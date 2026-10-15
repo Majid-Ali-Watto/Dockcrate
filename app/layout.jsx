@@ -2,6 +2,7 @@ import { headers } from 'next/headers';
 import './globals.css';
 import { isHosted } from '../src/api.js';
 import { siteOrigin } from '../lib/site.js';
+import { Analytics } from '@vercel/analytics/next';
 
 const title = 'Dockcrate · Docker & CI/CD file generator';
 const socialImage = {
@@ -68,7 +69,10 @@ export default async function RootLayout({ children }) {
       <head>
         <script nonce={nonce} suppressHydrationWarning dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
       </head>
-      <body>{children}</body>
+      <body>
+        {children}
+        <Analytics />
+      </body>
     </html>
   );
 }
