@@ -28,32 +28,44 @@ env:
   IMAGE: vcr.vercel.com/${{ vars.VERCEL_TEAM_SLUG }}/${{ vars.VERCEL_PROJECT_NAME }}/dockcrate:${{ github.sha }}
 
 jobs:
-  test:
+  test-and-build:
+    name: Test and build the site
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Check out the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Node.js 24 with the npm cache
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
-      - run: node --test
-      - run: npx next build
+          cache-dependency-path: package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run the tests
+        run: node --test
+      - name: Build the site
+        run: npx next build
 
-  image:
-    needs: test
+  build-and-push-image:
+    name: Build the image and push it to VCR
+    needs: test-and-build
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write # GitHub OIDC token for the VCR login
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: vercel/vcr-action/login@6888f841cb0d2255ef9dab40f068cba07234ef47 # v1
+      - name: Check out the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to Vercel Container Registry
+        uses: vercel/vcr-action/login@6888f841cb0d2255ef9dab40f068cba07234ef47 # v1
         with:
           team: ${{ vars.VERCEL_TEAM_ID }}
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - name: Build the image and push it to VCR
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64
@@ -62,13 +74,15 @@ jobs:
           tags: ${{ env.IMAGE }}
           outputs: type=image,push=true,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
       # Only an optimized image can be run by Vercel, so the deploy waits for it.
-      - uses: vercel/vcr-action/wait-for-optimized-image@6888f841cb0d2255ef9dab40f068cba07234ef47 # v1
+      - name: Wait for VCR to optimize the image
+        uses: vercel/vcr-action/wait-for-optimized-image@6888f841cb0d2255ef9dab40f068cba07234ef47 # v1
         with:
           image: ${{ env.IMAGE }}
           timeout-seconds: 600
 
-  deploy:
-    needs: image
+  deploy-production:
+    name: Deploy the image to Vercel (production)
+    needs: build-and-push-image
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -81,7 +95,8 @@ jobs:
       VERCEL_ORG_ID: ${{ vars.VERCEL_TEAM_ID }}
       VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
     steps:
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Set up Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
       # Vercel has no "deploy this image" flag: a deployment is built from a Dockerfile.vercel, so the deployed
@@ -90,7 +105,7 @@ jobs:
       # its build pulls the image from VCR with the project's own credentials. The service and rewrite in vercel.json
       # are what route traffic to the container; without them the deployment is Ready but every path is a 404.
       # USER root and PORT=80 because Vercel sends traffic to port 80 unless the project sets PORT.
-      - name: Deploy the image
+      - name: Deploy the pushed image to Vercel
         run: |
           mkdir deploy
           cat > deploy/vercel.json <<'JSON'
@@ -102,3 +117,51 @@ jobs:
           printf 'FROM %s\nUSER root\nENV PORT=80\n' "$IMAGE" > deploy/Dockerfile.vercel
           cd deploy
           npx --yes vercel@59.26.0 deploy --prod --token "$VERCEL_TOKEN"
+
+  # Keep two images in the repository: the one just deployed and the one before it (a rollback target).
+  # Only images tagged with a full commit SHA are considered, i.e. the ones this workflow pushed; anything Vercel
+  # creates itself is left alone.
+  prune-old-images:
+    name: Delete old images from VCR
+    needs: deploy-production
+    runs-on: ubuntu-latest
+    permissions: {}
+    concurrency:
+      group: prune-vcr
+      cancel-in-progress: false
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ vars.VERCEL_TEAM_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      KEEP: 2
+    steps:
+      - name: Set up Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Keep the two newest images, delete the rest
+        run: |
+          set -euo pipefail
+          repo=${IMAGE#vcr.vercel.com/*/*/}; repo=${repo%%:*}
+          api="https://api.vercel.com/v1/vcr/repository/$repo/images"
+          images='[]'; cursor=''
+          while :; do
+            page=$(curl -fsS -G -H "Authorization: Bearer $VERCEL_TOKEN" "$api" \
+              --data-urlencode "projectId=$VERCEL_PROJECT_ID" --data-urlencode "teamId=$VERCEL_ORG_ID" \
+              --data-urlencode limit=100 ${cursor:+--data-urlencode "cursor=$cursor"})
+            images=$(jq -c --argjson page "$page" '. + $page.images' <<<"$images")
+            cursor=$(jq -r '.nextCursor // empty' <<<"$page")
+            [ -n "$cursor" ] || break
+          done
+          # Newest first, one row per image that carries a commit-SHA tag.
+          ours=$(jq -c '
+            map({ id, createdAt, tag: ((.tags // []) | map(if type == "object" then (.tag // .name // "") else . end)
+                                       | map(select(test("^[0-9a-f]{40}$"))) | first) })
+            | map(select(.tag != null)) | sort_by(.createdAt) | reverse' <<<"$images")
+          # Never delete on a surprise: this run's image must be one of the ones kept.
+          jq -e --arg sha "$GITHUB_SHA" --argjson keep "$KEEP" '.[:$keep] | any(.tag == $sha)' <<<"$ours" >/dev/null \
+            || { echo "::error::image $GITHUB_SHA is not among the $KEEP newest in $repo; nothing was deleted"; exit 1; }
+          jq -r --argjson keep "$KEEP" '.[$keep:][] | "\(.id) \(.tag)"' <<<"$ours" | while read -r id tag; do
+            echo "deleting $repo:$tag ($id)"
+            npx --yes vercel@59.26.0 vcr image rm "$repo" "$id" --yes --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN" </dev/null
+          done

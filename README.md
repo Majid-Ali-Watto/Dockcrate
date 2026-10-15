@@ -186,6 +186,8 @@ Each run lists exactly which secrets and variables to create. Ticking `id-token:
 
 The site is deployed by CI/CD, not by Vercel's Git integration (`vercel.json` sets `git.deploymentEnabled` to `false`). On every push to `main`, `.github/workflows/deploy.yml` tests, builds the `Dockerfile`, pushes the image to Vercel Container Registry (`vcr.vercel.com/<team>/<project>/dockcrate:<commit>`), waits for VCR to optimize it, and deploys that image. Pull requests only test and build.
 
+After a successful deploy, a `prune-old-images` job keeps the two newest images the workflow pushed (the one just deployed and the one before it, for rollback) and deletes the older ones from the registry. It only touches images tagged with a full commit SHA, and it refuses to delete anything if the image it just deployed is not among the two newest.
+
 Vercel has no "deploy this image" flag, so the deploy step is a `Dockerfile.vercel` (`FROM` the pushed image) that Vercel builds from an otherwise empty folder (`vercel deploy --prod`, not `--prebuilt`: a local `vercel build` produces no container and the site would 404): what runs is exactly the image that was pushed. To set it up:
 
 - GitHub variables `VERCEL_TEAM_ID`, `VERCEL_TEAM_SLUG`, `VERCEL_PROJECT_ID`, `VERCEL_PROJECT_NAME`, and the secret `VERCEL_TOKEN`; a GitHub environment named `production`;
