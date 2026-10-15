@@ -1,7 +1,5 @@
-import { has, read, lines } from '../fsutil.js';
-import { alpineRuntime } from '../container.js';
-
-const manifestField = (toml, field) => toml.match(new RegExp(`^\\s*${field}\\s*=\\s*"([^"]+)"`, 'm'))?.[1];
+import { lines } from '../fsutil.js';
+import { DEFAULT_BUILD, apk, binaryRuntime, envLines, healthcheck, systemUser } from '../container.js';
 
 export const rust = {
   id: 'rust',
@@ -15,36 +13,76 @@ export const rust = {
   ecosystem: () => 'cargo',
   codeql: 'rust',
   devcontainer: () => 'mcr.microsoft.com/devcontainers/rust:1',
-  ignore: ['target'],
+  ignore: (b, i) => (b.mode === 'production' ? ['target/*', `!target/release/${i.name}`, `!target/x86_64-unknown-linux-musl/release/${i.name}`] : ['target']),
   starter: (opts) => ({ name: opts.name ?? 'app', locked: true, bin: true, detected: opts.runtime ?? '1', version: opts.runtime ?? '1' }),
   assumes: (i) => `a Cargo.lock that you commit, and a binary crate named ${i.name}`,
-  detect(dir, opts) {
-    if (!has(dir, 'Cargo.toml')) return null;
-    const toml = read(dir, 'Cargo.toml');
-    const pkg = toml.match(/^\[package\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/m)?.[1];
-    if (!pkg) throw new Error('Cargo.toml has no [package] table (a workspace root?); run dockcrate in the crate folder you want to ship');
-    const detected = manifestField(pkg, 'rust-version');
-    return {
-      name: manifestField(pkg, 'name'),
-      locked: has(dir, 'Cargo.lock'),
-      bin: has(dir, 'src/main.rs') || /^\[\[bin\]\]/m.test(toml),
-      detected,
-      version: opts.runtime ?? detected ?? '1',
-    };
-  },
-  dockerfile: (i, port, c) =>
-    lines(
+  dev: (i, port, c) => ({
+    dockerfile: lines(
       '# syntax=docker/dockerfile:1',
-      `FROM rust:${i.version}-alpine AS build`,
+      `FROM rust:${i.version}-alpine`,
       'RUN apk add --no-cache musl-dev',
+      apk(c),
+      'WORKDIR /src',
+      `ENV PORT=${port}`,
+      envLines(c),
+      'COPY . .',
+      `EXPOSE ${port}`,
+      `CMD ${JSON.stringify(['cargo', 'run'])}`,
+    ),
+    workdir: '/src',
+    mode: 'watch',
+    volumes: [],
+  }),
+  dockerfile(i, port, c, b = DEFAULT_BUILD) {
+    const v = b.variant ?? 'alpine';
+    const alpine = v === 'alpine';
+    const MUSL = 'x86_64-unknown-linux-musl';
+    if (b.mode === 'production') {
+      // A binary built outside: musl for alpine, the host's glibc for slim.
+      return lines('# syntax=docker/dockerfile:1', binaryRuntime(c, port, v, `COPY ${alpine ? `target/${MUSL}` : 'target'}/release/${i.name} /usr/local/bin/app`));
+    }
+    if (b.mode === 'mixed') {
+      // One image: cargo builds the binary and the same image runs it.
+      return lines(
+        '# syntax=docker/dockerfile:1',
+        `FROM rust:${i.version}-${v}`,
+        alpine && 'RUN apk add --no-cache musl-dev',
+        alpine ? apk(c) : (c.packages.length > 0 && `RUN apt-get update && apt-get install -y --no-install-recommends ${c.packages.join(' ')} && rm -rf /var/lib/apt/lists/*`),
+        'WORKDIR /src',
+        'COPY . .',
+        'RUN --mount=type=cache,target=/usr/local/cargo/registry \\',
+        `    cargo build --release${i.locked ? ' --locked' : ''} && cp target/release/${i.name} /usr/local/bin/app`,
+        systemUser(v),
+        'USER app',
+        `ENV PORT=${port}`,
+        envLines(c),
+        `EXPOSE ${port}`,
+        healthcheck(c, port, alpine ? 'wget' : 'tcp'),
+        'ENTRYPOINT ["/usr/local/bin/app"]',
+      );
+    }
+    return lines(
+      '# syntax=docker/dockerfile:1',
+      `FROM rust:${i.version}-${v} AS build`,
+      alpine && 'RUN apk add --no-cache musl-dev',
       'WORKDIR /src',
       'COPY . .',
       'RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \\',
       `    cargo build --release${i.locked ? ' --locked' : ''} && \\`,
       `    mkdir -p /out && cp target/release/${i.name} /out/app`,
       '',
-      alpineRuntime(c, port),
-    ),
+      binaryRuntime(c, port, v, 'COPY --from=build /out/app /usr/local/bin/app'),
+    );
+  },
+  variants: ['alpine', 'slim'],
+  defaultVariant: 'alpine',
+  healthKind: (b) => (b.variant === 'alpine' ? 'wget' : 'tcp'),
+  buildNotes: (i, b) => [
+    b.mode === 'production' &&
+      `Production only: the image copies the binary you built (${b.variant === 'alpine' ? `target/x86_64-unknown-linux-musl/release/${i.name}: cargo build --release --target x86_64-unknown-linux-musl, with the musl target installed; use the aarch64 triple on ARM` : `target/release/${i.name}: cargo build --release, on a Debian-compatible host`}); the generated pipeline builds the image from the repository as it is.`,
+    b.mode === 'mixed' && 'Build and production in one image: it keeps the Rust toolchain and the sources next to the binary, so it is much bigger than a multi-stage image.',
+    b.variant === 'slim' && b.mode !== 'production' && 'The slim image links against glibc (Debian), not musl.',
+  ],
   ci(i, v = i.version, selected) {
     const on = (step) => selected.includes(step);
     return {
@@ -55,18 +93,15 @@ export const rust = {
           with: { toolchain: v === '1' ? 'stable' : v },
         },
         { uses: 'Swatinem/rust-cache@v2' },
-        on('lint') && { run: 'rustup component add clippy' },
-        on('lint') && { run: 'cargo clippy --all-targets -- -D warnings' },
-        on('test') && { run: 'cargo test' },
-        on('build') && { run: 'cargo build --release' },
-        on('audit') && { run: ['cargo install cargo-audit --locked', 'cargo audit'] },
+        on('lint') && { run: 'rustup component add clippy', ciStep: 'lint' },
+        on('lint') && { run: 'cargo clippy --all-targets -- -D warnings', ciStep: 'lint' },
+        on('test') && { run: 'cargo test', ciStep: 'test' },
+        on('build') && { run: 'cargo build --release', ciStep: 'build' },
+        on('audit') && { run: ['cargo install cargo-audit --locked', 'cargo audit'], ciStep: 'audit' },
       ],
     };
   },
   notes: (i, port) => [
     `The binary must listen on the PORT environment variable (set to ${port}) on 0.0.0.0.`,
-    !i.locked && 'No Cargo.lock found: the build is not locked. Commit Cargo.lock for reproducible images.',
-    !i.bin && 'No src/main.rs or [[bin]] target found: this looks like a library crate, so the Docker build will fail.',
-    !i.detected && 'No rust-version in Cargo.toml: the image uses the latest stable Rust. Use --runtime to pin one.',
   ],
 };

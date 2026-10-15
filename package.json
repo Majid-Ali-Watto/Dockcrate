@@ -1,7 +1,7 @@
 {
   "name": "dockcrate",
   "version": "0.1.0",
-  "description": "Generate Dockerfile, compose and CI/CD files for an existing or a new project (CLI + Next.js UI)",
+  "description": "Generate Dockerfile, compose and CI/CD files for a new project (CLI + Next.js UI)",
   "type": "module",
   "bin": {
     "dockcrate": "bin/dockcrate.js"

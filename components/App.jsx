@@ -27,16 +27,14 @@ export default function App({ meta: serverMeta }) {
 
   const show = useMemo(() => visibility(form, meta, result), [form, meta, result]);
   const body = useMemo(() => JSON.stringify(toBody(form, show)), [form, show]);
-  const dir = form.dirs[form.mode];
+  const dir = form.dir;
 
   const set = useCallback((key, value) => {
     setForm((prev) => {
-      if (key === 'dir') return { ...prev, dirs: { ...prev.dirs, [prev.mode]: value }, ciSteps: null };
       const next = { ...prev, [key]: value };
-      // What a step list means depends on the project and stack, so go back to the defaults when they change.
-      if (['mode', 'stack', 'tool'].includes(key)) next.ciSteps = null;
+      // What a step list means depends on the stack, so go back to the defaults when it changes.
+      if (['stack', 'tool', 'services'].includes(key)) next.ciSteps = null;
       if (key === 'stack') next.tool = '';
-      if (key === 'mode' && value === 'new' && !next.stack) next.stack = 'node';
       return next;
     });
   }, []);
@@ -55,11 +53,6 @@ export default function App({ meta: serverMeta }) {
 
   // Regenerate the preview shortly after the form settles.
   useEffect(() => {
-    if (form.mode === 'existing' && !dir.trim()) {
-      setResult(null);
-      setError('Enter a project folder.');
-      return undefined;
-    }
     const controller = new AbortController();
     const timer = setTimeout(async () => {
       setLoading(true);
@@ -112,17 +105,16 @@ export default function App({ meta: serverMeta }) {
           <p>
             {meta.hosted
               ? 'Dockerfile, compose and CI/CD for a new project. Pick a stack, preview the files, then copy or download them. Nothing you enter is stored.'
-              : 'Dockerfile, compose and CI/CD for an existing or a new project. Runs locally; nothing leaves your machine.'}
+              : 'Dockerfile, compose and CI/CD for a new project. Pick a stack, preview the files, then add them to a project folder or download them. Runs locally; nothing leaves your machine.'}
           </p>
         </header>
-        <Sidebar form={form} set={set} meta={meta} show={show} result={result} onBrowse={() => setPicker(true)} />
+        <Sidebar form={form} set={set} meta={meta} show={show} result={result} loading={loading} onBrowse={() => setPicker(true)} />
       </aside>
       <main className="main">
         <Preview
           result={result}
           error={error}
           loading={loading}
-          isNew={show.isNew}
           hosted={meta.hosted}
           canWrite={Boolean(dir.trim())}
           onWrite={write}
@@ -136,7 +128,7 @@ export default function App({ meta: serverMeta }) {
       {picker && (
         <FolderPicker
           open={picker}
-          startDir={dir}
+          startDir={dir || meta.cwd}
           home={meta.home}
           onClose={() => setPicker(false)}
           onChoose={(chosen) => {

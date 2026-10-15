@@ -4,9 +4,12 @@ import dynamic from 'next/dynamic';
 import { useMemo, useState } from 'react';
 import { download } from '../lib/client.js';
 import { changedLines, fileState, splitLines } from '../lib/diff.js';
+import { groupPaths } from '../lib/groups.js';
+import Accuracy from './Accuracy.jsx';
+import { Skeleton, SkeletonPreview } from './Skeleton.jsx';
 
 // Only needed once the user starts editing.
-const BlockEditor = dynamic(() => import('./BlockEditor.jsx'));
+const BlockEditor = dynamic(() => import('./BlockEditor.jsx'), { loading: () => <Skeleton rows={6} label="Loading the editor" /> });
 
 const TAG_LABELS = { new: 'new', same: 'identical', differs: 'differs' };
 
@@ -26,7 +29,7 @@ function Code({ lines, changed, label }) {
   );
 }
 
-export default function Preview({ result, error, loading, isNew, hosted = false, canWrite, onWrite, writing, written, writeError, edits = {}, onEdit }) {
+export default function Preview({ result, error, loading, hosted = false, canWrite, onWrite, writing, written, writeError, edits = {}, onEdit }) {
   const [active, setActive] = useState('');
   const [editing, setEditing] = useState(false);
   const [newFile, setNewFile] = useState(null);
@@ -37,6 +40,8 @@ export default function Preview({ result, error, loading, isNew, hosted = false,
   // Files you switched off still need a tab, or there would be no way to switch them back on.
   const disabled = Object.entries(edits).filter(([path, e]) => e.disabled && !files.some((f) => f.path === path));
   const file = files.find((f) => f.path === active) ?? files[0];
+  const allPaths = [...files.map((f) => f.path), ...disabled.map(([path]) => path)];
+  const groups = result?.multi ? groupPaths(allPaths, result.services) : [{ name: '', paths: allPaths }];
   const counts = useMemo(() => {
     const c = { new: 0, same: 0, differs: 0 };
     for (const f of files) c[fileState(f)]++;
@@ -63,7 +68,12 @@ export default function Preview({ result, error, loading, isNew, hosted = false,
       ? { text: loading ? 'Loading…' : '', className: '' }
       : !files.length
         ? { text: 'Nothing to generate for this selection (for example, the SSH target has no deployment files).', className: '' }
-        : { text: isNew ? `New project: ${result.stack}` : `Detected stack: ${result.stack}`, className: '' };
+        : {
+            text: result.multi
+              ? `${result.services.length} services (${result.services.map((s) => `${s.name}: ${s.stack}`).join(', ')})`
+              : `${result.stack} project`,
+            className: '',
+          };
 
   return (
     <>
@@ -73,23 +83,27 @@ export default function Preview({ result, error, loading, isNew, hosted = false,
         </p>
         {!error && files.length > 0 && (
           <div className="tabs">
-            <div className="tablist" role="tablist" aria-label="Generated files">
-              {files.map((f) => (
-                <button
-                  key={f.path}
-                  type="button"
-                  role="tab"
-                  aria-selected={f === file}
-                  onClick={() => setActive(f.path)}
-                >
-                  {f.path} <Tag state={fileState(f)} />
-                  {edits[f.path] && <span className="tag differs">edited</span>}
-                </button>
-              ))}
-              {disabled.map(([path]) => (
-                <button key={path} type="button" role="tab" aria-selected={false} className="off" onClick={() => onEdit(path, (cur) => ({ ...cur, disabled: false }))}>
-                  {path} <span className="tag same">off: turn on</span>
-                </button>
+            <div className={result.multi ? 'tabgroups' : 'flat'}>
+              {groups.map((g) => (
+                <div key={g.name} className={result.multi ? 'tabgroup' : 'flat'}>
+                  {result.multi && <span className="tabgroup-name">{g.name}</span>}
+                  <div className="tablist" role="tablist" aria-label={result.multi ? `${g.name} files` : 'Generated files'}>
+                    {g.paths.map((path) => {
+                      const f = files.find((x) => x.path === path);
+                      return f ? (
+                        <button key={path} type="button" role="tab" aria-selected={f === file} onClick={() => setActive(path)}>
+                          {path}
+                          {fileState(f) !== 'new' && <Tag state={fileState(f)} />}
+                          {edits[path] && <span className="tag edited">edited</span>}
+                        </button>
+                      ) : (
+                        <button key={path} type="button" role="tab" aria-selected={false} className="off" onClick={() => onEdit(path, (cur) => ({ ...cur, disabled: false }))}>
+                          {path} <span className="tag same">off: turn on</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               ))}
             </div>
             {newFile === null ? (
@@ -166,10 +180,12 @@ export default function Preview({ result, error, loading, isNew, hosted = false,
           </section>
         </div>
       )}
-      {(error || !file) && !(editing && file) && <div className="panes empty" />}
+      {!error && !result && <SkeletonPreview />}
+      {(error || (result && !file)) && !(editing && file) && <div className="panes empty" />}
 
       {!error && files.length > 0 && (
         <div className="main-foot">
+          <Accuracy />
           {result.notes.length > 0 && (
             <details className="notes" open>
               <summary>Notes ({result.notes.length})</summary>

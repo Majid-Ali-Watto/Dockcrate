@@ -19,18 +19,32 @@ import {
   DEPLOY_ON,
   REGISTRY_CHOICES,
   EXTRAS,
+  RESTART_POLICIES,
+  parseDeploySpec,
+  parseServiceSpec,
 } from '../src/generate.js';
 
-const HELP = `dockcrate - generate Dockerfile, docker-compose and CI/CD files for an existing or a new project
+const HELP = `dockcrate - generate Dockerfile, docker-compose and CI/CD files for a new project
 
-Usage: dockcrate [dir] [options]
+Usage: dockcrate [dir] --stack <id> [options]
+       dockcrate [dir] --service <spec> [--service <spec> ...] [options]
 
-  dir                  project directory (default: current directory)
-  --new                new project: no folder is read; you choose the stack and tools (needs --stack)
-  --stack <id>         ${stackIds().join(' | ')} (default: auto-detect)
-  --tool <name>        package manager / build tool for --new: npm|yarn|pnpm, pip|uv|poetry, maven|gradle
-  --name <name>        project name for --new (angular output folder, django project, .NET project)
-  --no-build           --new node server without a build step (plain JavaScript)
+  dir                  the project folder the files are written to (default: current directory); nothing in it is read
+  --stack <id>         ${stackIds().join(' | ')}
+  --tool <name>        package manager / build tool: npm|yarn|pnpm, pip|uv|poetry, maven|gradle
+  --name <name>        project name (angular output folder, django project, .NET project)
+  --no-build           node server without a build step (plain JavaScript)
+  --service <spec>     one service: [name=]dir:stack[@port], repeatable, e.g. --service api=./api:django@8000 --service web=./web:vue
+  --services <file>    services as JSON: [{ "name": "api", "dir": "api", "stack": "django", "port": 8000, "db": ["postgres"], ... }]
+  --changed-only       several services: test, build and deploy only the services whose folder changed (tags, schedules and manual runs do everything)
+  --shared-paths <l>   with --changed-only: paths (globs) that rebuild every service, e.g. libs/**,package.json
+  --db-per-service     several services: each gets its own database on the shared server (postgres, mysql, mariadb, mongo) and its own redis database
+  --envs <list>        environments, e.g. dev,qa,prod: a compose override per environment, and a Dockerfile.dev for dev
+  --image <variant>    base image flavor: alpine | slim (default: each stack's own: alpine for node/go/rust/static sites, slim for the rest;
+                       PHP is slim only because it runs Apache)
+  --no-multistage      one stage instead of build + runtime stages; see --single-stage
+  --single-stage <m>   with --no-multistage: production (default: a runtime-only image, production dependencies, no build tools; compiled
+                       languages and static sites copy what you built first) | mixed (build tools and the app in one image: builds by itself, bigger)
   --only <list>        only these file groups: dockerfile, dockerignore, compose, ci, deploy, repo
   --extras <list>      extra repo files: ${EXTRAS.join(', ')} (dependabot falls back to Renovate on GitLab)
   --ci <kind>          ${ciIds().join(' | ')} | none (default: github)
@@ -39,18 +53,22 @@ Usage: dockcrate [dir] [options]
   --deploy <target>    ${targetIds().join(' | ')} (default: registry = just push the image)
   --deploy-on <when>   ${DEPLOY_ON.join(' | ')} (default: branch = the default branch)
   --environment <name> GitHub/GitLab environment for the deploy job (default: production)
+  --deploy-to <spec>   several environments, repeatable: name=branch|tag|manual[:match], e.g. --deploy-to qa=branch:develop
+                       --deploy-to staging=branch --deploy-to production=tag:v* (replaces --deploy-on and --environment)
 
   Pipeline:
   --pipeline-name <n>  name of the pipeline / workflow (default: CI)
   --branches <list>    push triggers, comma-separated globs, or "none" (default: main)
   --branches-ignore <l> branches that never trigger a run
+  --no-push            do not run on pushes to branches (same as --branches none)
+  --no-tags            do not run when a tag is pushed (same as --tags none)
   --tags <list|none>   tag triggers, comma-separated globs (default: v*)
   --tags-ignore <list> tags that never trigger a run
   --no-pr              do not run on pull / merge requests
   --pr-branches <list> only pull requests targeting these branches
   --paths <list>       only run when these paths change (globs); --paths-ignore for the opposite
   --release            run when a GitHub release is published
-  --manual             allow manual runs (workflow_dispatch / web)
+  --manual             allow manual runs (workflow_dispatch / web), which ask which CI steps to run; a manual-only pipeline needs --no-push --no-tags --no-pr
   --schedule "<cron>"  scheduled runs, 5-field cron (repeatable; GitLab/Bitbucket: also create the schedule in the UI)
   --runner <label>     runner / agent / pool image (GitHub runs-on, Azure vmImage, Jenkins agent label)
   --timeout <minutes>  job timeout
@@ -81,12 +99,17 @@ Usage: dockcrate [dir] [options]
                        Cloud deploy targets (cloudrun, ecs, azure) always use their own registry; ssh needs a username/token registry
 
   Container:
+  --network <spec>     a compose network, repeatable: name[:internal|:external] (internal: no route out; external: already exists)
+  --app-network <list> the networks every service joins (default: all declared); a service can list its own in --services
+  --db-network <list>  the networks the databases and queues join (default: all declared)
+  --restart <policy>   compose restart policy: ${RESTART_POLICIES.join(' | ')} (default: unless-stopped)
+  --replicas <n>       Kubernetes replicas per service (default: 2)
   --healthcheck <path> add a HEALTHCHECK probing this path, e.g. /health
   --packages <list>    OS packages to install in the runtime image (apk/apt names)
   --env NAME=value     runtime ENV in the image (repeatable; no secrets)
   --build-arg NAME[=v] build-time ARG/ENV for Node and static sites, e.g. VITE_API_URL (repeatable)
 
-  --db <list>          comma-separated: ${dbIds().join(', ')}
+  --db <list>          comma-separated: ${dbIds().join(', ')}; with several SQL engines the first keeps DATABASE_URL, the others get POSTGRES_URL, MYSQL_URL or MARIADB_URL
   --port <n>           port the app listens on inside the container
   --runtime <version>  override the detected runtime version (node 22, python 3.12, dotnet 8.0, java 17, go 1.25)
   --build-dir <dir>    static site build output (react/vue/angular)
@@ -144,15 +167,24 @@ try {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
-      new: { type: 'boolean' },
       stack: { type: 'string' },
       tool: { type: 'string' },
       name: { type: 'string' },
       'no-build': { type: 'boolean' },
       only: { type: 'string' },
+      image: { type: 'string' },
+      'no-multistage': { type: 'boolean' },
+      'single-stage': { type: 'string' },
+      service: { type: 'string', multiple: true },
+      services: { type: 'string' },
+      envs: { type: 'string' },
+      'changed-only': { type: 'boolean' },
+      'db-per-service': { type: 'boolean' },
+      'shared-paths': { type: 'string' },
       deploy: { type: 'string' },
       'deploy-on': { type: 'string' },
       environment: { type: 'string' },
+      'deploy-to': { type: 'string', multiple: true },
       branches: { type: 'string' },
       tags: { type: 'string' },
       'branches-ignore': { type: 'string' },
@@ -175,6 +207,8 @@ try {
       edits: { type: 'string' },
       'no-pr': { type: 'boolean' },
       manual: { type: 'boolean' },
+      'no-push': { type: 'boolean' },
+      'no-tags': { type: 'boolean' },
       schedule: { type: 'string', multiple: true },
       concurrency: { type: 'string' },
       permissions: { type: 'string' },
@@ -191,6 +225,11 @@ try {
       registry: { type: 'string' },
       extras: { type: 'string' },
       healthcheck: { type: 'string' },
+      restart: { type: 'string' },
+      network: { type: 'string', multiple: true },
+      'app-network': { type: 'string' },
+      'db-network': { type: 'string' },
+      replicas: { type: 'string' },
       packages: { type: 'string' },
       env: { type: 'string', multiple: true },
       'build-arg': { type: 'string', multiple: true },
@@ -215,8 +254,19 @@ try {
   }
 
   const dir = resolve(positionals[0] ?? '.');
-  const { stack, files, notes } = generate(dir, {
-    isNew: values.new,
+  if (values.service && values.services) throw new Error('use --service or --services, not both');
+  const services = values.services
+    ? JSON.parse(readFileSync(resolve(values.services), 'utf8'))
+    : values.service?.map(parseServiceSpec);
+  const { stack, files, notes, multi, services: found } = generate(dir, {
+    services,
+    envs: csv(values.envs),
+    imageVariant: values.image,
+    multistage: values['no-multistage'] ? false : undefined,
+    stageMode: values['single-stage'],
+    changedOnly: values['changed-only'],
+    dbPerService: values['db-per-service'],
+    sharedPaths: csv(values['shared-paths']),
     tool: values.tool,
     name: values.name,
     build: values['no-build'] ? false : undefined,
@@ -224,8 +274,9 @@ try {
     deploy: values.deploy,
     deployOn: values['deploy-on'],
     environment: values.environment,
-    branches: values.branches === 'none' ? [] : csv(values.branches),
-    tags: values.tags === 'none' ? [] : csv(values.tags),
+    deployTo: values['deploy-to']?.map(parseDeploySpec),
+    branches: values.branches === 'none' || values['no-push'] ? [] : csv(values.branches),
+    tags: values.tags === 'none' || values['no-tags'] ? [] : csv(values.tags),
     branchesIgnore: csv(values['branches-ignore']),
     tagsIgnore: csv(values['tags-ignore']),
     prBranches: csv(values['pr-branches']),
@@ -262,6 +313,15 @@ try {
     registry: values.registry,
     extras: csv(values.extras),
     healthcheck: values.healthcheck,
+    restart: values.restart,
+    networks: values.network?.map((spec) => {
+      const [name, kind] = spec.split(':');
+      if (kind && !['internal', 'external'].includes(kind)) throw new Error(`invalid network "${spec}": use name, name:internal or name:external`);
+      return { name, internal: kind === 'internal', external: kind === 'external' };
+    }),
+    appNetworks: csv(values['app-network']),
+    dbNetworks: csv(values['db-network']),
+    replicas: values.replicas && Number(values.replicas),
     packages: csv(values.packages),
     env: values.env,
     buildArgs: values['build-arg'],
@@ -273,7 +333,8 @@ try {
     buildDir: values['build-dir'],
   });
 
-  console.log(values.new ? `New ${stack} project` : `Detected stack: ${stack}`);
+  if (multi) console.log(`Services: ${found.map((f) => `${f.name} (${f.stack}, ${f.dir})`).join(', ')}`);
+  else console.log(`${stack} project`);
   if (values['dry-run']) {
     for (const { path, content } of files) console.log(`\n--- ${path} ---\n${content}`);
   } else {
@@ -282,6 +343,7 @@ try {
     }
   }
   if (notes.length) console.log(`\nNotes:\n${notes.map((n) => `  - ${n}`).join('\n')}`);
+  console.log('\nThese files are a very good first draft, not a guarantee: Dockerfiles and compose are usually right for standard projects, pipelines are checked but not run on your CI,\nand deploy files are templates never run against a real account. Expect small edits (ports, commands, secret names, limits) and read the notes above.')
 } catch (err) {
   console.error(`dockcrate: ${err.message}`);
   process.exit(1);

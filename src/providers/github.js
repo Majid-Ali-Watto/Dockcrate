@@ -1,5 +1,5 @@
-import { block, mapLines, q, scalar, uniqueKeys, stepTitle, when, withoutDepCache, x } from './common.js';
-import { healthCmd, serviceEnv, serviceUrl } from './common.js';
+import { block, manualGate, manualLabel, mapLines, q, scalar, uniqueKeys, stepTitle, when, withoutDepCache, x } from './common.js';
+import { changedLines, healthCmd, imageRepo, inApp, isMulti, serviceEnv, serviceUrl, stepsInDir } from './common.js';
 import { DBS } from '../compose.js';
 import { REGISTRIES } from '../deploy.js';
 import { pinAction } from './pins.js';
@@ -12,12 +12,13 @@ const runLines = (run) => {
 };
 
 /** One step as YAML list-item lines. `key` and `title` only name the block; they are not part of the YAML. */
-function stepLines({ id, if: cond, uses, with: params, run, env }, pin) {
+function stepLines({ id, if: cond, uses, with: params, run, env, dir }, pin) {
   const fields = [
     id && `id: ${id}`,
     cond && `if: ${q(cond)}`,
     uses && `uses: ${pin(uses)}`,
     run && runLines(run),
+    dir && `working-directory: ${dir}`,
     params && ['with:', mapLines(params, '  ')],
     env && ['env:', mapLines(env, '  ')],
   ]
@@ -49,11 +50,30 @@ function tokenPermissions(list) {
   return out;
 }
 
-const DEPLOY_CONDITION = {
-  branch: "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
-  tag: "startsWith(github.ref, 'refs/tags/')",
-  manual: "github.event_name == 'workflow_dispatch'",
-};
+/** The `if` of a deploy job: the default branch, a branch or branch prefix, a tag or tag prefix, or a manual run of that environment. */
+function deployCondition(p, d) {
+  const ref = (kind) => {
+    const prefix = d.match?.endsWith('*');
+    const value = d.match?.replace(/\*$/, '');
+    return prefix ? `startsWith(github.ref, 'refs/${kind}/${value}')` : `github.ref == 'refs/${kind}/${value}'`;
+  };
+  if (d.on === 'branch') return d.match ? ref('heads') : "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)";
+  if (d.on === 'tag') return d.match ? ref('tags') : "startsWith(github.ref, 'refs/tags/')";
+  // Several manual environments share one trigger: the run asks which one.
+  return manualEnvs(p).length > 1 ? `github.event_name == 'workflow_dispatch' && inputs.environment == '${d.name}'` : "github.event_name == 'workflow_dispatch'";
+}
+
+const manualEnvs = (p) => p.deployments.filter((d) => d.on === 'manual');
+
+/** The inputs of a manual run: the environment to deploy when there are several manual ones, then a checkbox per CI step. */
+function dispatchInputs(p) {
+  const envs = manualEnvs(p).map((d) => d.name);
+  const inputs = [
+    envs.length > 1 && ['      environment:', '        description: "Environment to deploy"', '        required: false', '        type: choice', `        options: ${JSON.stringify(envs)}`],
+    ...p.manualSteps.map((step) => [`      ${step}:`, `        description: ${q(manualLabel(step))}`, '        required: false', '        type: boolean', '        default: true']),
+  ].filter(Boolean);
+  return inputs.length ? ['    inputs:', inputs] : null;
+}
 
 /** Include patterns, then the ignored ones as `!pattern` (GitHub forbids `x` and `x-ignore` together). */
 const filter = (key, include, ignore, pad) => {
@@ -82,7 +102,34 @@ const IMAGE_TAGS = {
   latest: ['type=raw,value=latest,enable={{is_default_branch}}'],
 };
 
-function render(p, ciSteps) {
+/**
+ * Apps whose test job is identical share one job with a matrix over the apps; the rest get a job of their own. Jobs are called
+ * `test` for a single app, `test-<service>` for a lone app and `test-<stack>` for a group.
+ */
+function testGroups(p) {
+  const groups = new Map();
+  for (const app of p.apps) {
+    const test = app.ci(app.versions.length ? x('matrix.version') : undefined);
+    // A manual run skips the steps whose checkbox is not ticked; every other event runs them all.
+    const gated = (step) => {
+      const gate = manualGate(p, step, (n) => `inputs.${n}`);
+      return gate ? { ...step, if: ["github.event_name != 'workflow_dispatch'", ...gate].join(' || ') } : step;
+    };
+    const steps = (p.depCache ? test.steps : withoutDepCache(test.steps)).filter(Boolean).map(gated);
+    const key = JSON.stringify([stepsInDir(steps, app.dir === '.' ? '.' : '@dir'), app.versions]);
+    if (!groups.has(key)) groups.set(key, { apps: [], steps, versions: app.versions });
+    groups.get(key).apps.push(app);
+  }
+  const used = new Set();
+  return [...groups.values()].map((g) => {
+    let id = !isMulti(p) ? 'test' : g.apps.length === 1 ? `test-${g.apps[0].id}` : `test-${g.apps[0].stackId}`;
+    for (let n = 2; used.has(id); n += 1) id = `${id.replace(/-\d+$/, '')}-${n}`;
+    used.add(id);
+    return { ...g, id };
+  });
+}
+
+function render(p) {
   const stepBlocks = stepper(p);
   const { triggers: t, target, appName } = p;
   const registry = p.registryId ? REGISTRIES[p.registryId].github : null;
@@ -96,11 +143,6 @@ function render(p, ciSteps) {
   const base = { contents: 'read', ...tokenPermissions(p.permissions) };
   const jobPermissions = (extra = {}) => ({ ...base, ...extra });
 
-  const matrix = { ...(p.os.length && { os: p.os }), ...(p.versions.length && { version: p.versions }) };
-  const matrixed = Object.keys(matrix).length > 0;
-  const test = ciSteps(p.versions.length ? x('matrix.version') : undefined);
-  const testSteps = p.depCache ? test.steps : withoutDepCache(test.steps);
-
   const blocks = [];
   blocks.push(block('name', 'Workflow name', `name: ${scalar(p.workflowName)}`, false));
 
@@ -111,7 +153,7 @@ function render(p, ciSteps) {
       push,
       t.pullRequests && ['  pull_request:', filter('branches', t.prBranches, [], '    '), filter('paths', t.paths, t.pathsIgnore, '    ')],
       t.release && ['  release:', '    types: [published]'],
-      t.manual && '  workflow_dispatch:',
+      t.manual && ['  workflow_dispatch:', dispatchInputs(p)],
       when(t.schedule.length, '  schedule:', t.schedule.map((cron) => `    - cron: ${q(cron)}`)),
     ]),
   );
@@ -125,57 +167,131 @@ function render(p, ciSteps) {
   }
   blocks.push(block('jobs', 'Jobs', 'jobs:'));
 
-  // -- test
-  if (p.testJob) blocks.push(
-    block(
-      'test.header',
-      'test: job settings',
-      [
-        '  test:',
-        `    runs-on: ${matrixed && p.os.length ? x('matrix.os') : runner}`,
-        timeout,
-        matrixed && [
-          '    strategy:',
-          `      fail-fast: ${p.failFast}`,
-          '      matrix:',
-          Object.entries(matrix).map(([k, v]) => `        ${k}: ${JSON.stringify(v)}`),
+  // -- changes: which services' folders changed, as outputs the other jobs build their matrices from
+  const multi = isMulti(p);
+  const changed = p.changedOnly;
+  const jobIds = [];
+  const groups = p.testJob ? testGroups(p) : [];
+  const out = (key) => x(`needs.changes.outputs.${key}`);
+  const listOf = (key) => x(`fromJSON(needs.changes.outputs.${key})`);
+  const some = (key) => `needs.changes.outputs.${key} != '[]'`;
+  const changedApp = (app) => `contains(needs.changes.outputs.changed, ',all,') || contains(needs.changes.outputs.changed, ',${app.id},')`;
+  const argNames = (app) => app.buildArgs.join(' ');
+  const withArgs = p.apps.some((a) => a.buildArgs.length);
+  if (changed) {
+    const lists = [
+      ...groups.filter((g) => g.apps.length > 1).map((g) => ({ key: g.id, apps: g.apps, item: (a) => `"${a.dir}"` })),
+      ...(p.lintDockerfile ? [{ key: 'lint', apps: p.apps, item: (a) => JSON.stringify({ service: a.id, dockerfile: inApp(a, 'Dockerfile') }) }] : []),
+      ...(p.registryId ? [{ key: 'images', apps: p.apps, item: (a) => JSON.stringify({ service: a.id, dir: a.dir, ...(withArgs && { args: argNames(a) }) }) }] : []),
+    ];
+    const run = [
+      'set -eu',
+      ...changedLines(p, {
+        ciPath: github.path,
+        setup: [
+          'case "$EVENT_NAME" in',
+          '  push) case "$GITHUB_REF" in refs/tags/*) ALL=1;; *) BASE="$BEFORE";; esac;;',
+          '  pull_request) BASE=$(git merge-base "origin/$BASE_REF" HEAD || true);;',
+          '  *) ALL=1;;',
+          'esac',
         ],
-        p.os.some((o) => !o.startsWith('ubuntu')) && ['    defaults:', '      run:', '        shell: bash'],
-        when(p.services.length, '    services:', p.services.flatMap(service)),
-        when(p.services.length, '    env:', mapLines(Object.fromEntries(p.services.map((n) => serviceUrl(n, 'localhost'))), '      ')),
-        '    steps:',
-      ],
-      false,
-    ),
-    ...stepBlocks('test', [{ key: 'checkout', uses: 'actions/checkout@v4' }, ...testSteps]),
-  );
+      }),
+      'hit() { case "$CHANGED" in *,all,*|*,"$1",*) return 0;; *) return 1;; esac; }',
+      'echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"',
+      'if [ "$CHANGED" = "," ]; then echo "any=false" >> "$GITHUB_OUTPUT"; else echo "any=true" >> "$GITHUB_OUTPUT"; fi',
+      ...lists.flatMap((l, n) => [
+        `list${n}=""`,
+        ...l.apps.map((a) => `if hit ${a.id}; then list${n}="\${list${n}:+$list${n},}"'${l.item(a)}'; fi`),
+        `echo "${l.key}=[$list${n}]" >> "$GITHUB_OUTPUT"`,
+      ]),
+    ];
+    blocks.push(
+      block('changes.header', 'changes: job settings', ['  changes:', `    runs-on: ${runner}`, timeout, '    outputs:', ['any', 'changed', ...lists.map((l) => l.key)].map((k) => `      ${k}: ${x(`steps.diff.outputs.${k}`)}`), '    steps:'], false),
+      ...stepBlocks('changes', [
+        { key: 'checkout', uses: 'actions/checkout@v4', with: { 'fetch-depth': 0 } },
+        { key: 'diff', id: 'diff', title: 'Find the changed services', run, env: { EVENT_NAME: x('github.event_name'), BEFORE: x('github.event.before'), BASE_REF: x('github.base_ref') } },
+      ]),
+    );
+  }
+
+  // -- test: one job per group of apps that run the same steps, a matrix over the apps in a group
+  for (const group of groups) {
+    jobIds.push(group.id);
+    const grouped = group.apps.length > 1;
+    const matrix = {
+      ...(p.os.length && { os: p.os }),
+      ...(group.versions.length && { version: group.versions }),
+      ...(grouped && !changed && { service: group.apps.map((a) => a.id), include: group.apps.map((a) => ({ service: a.id, dir: a.dir })) }),
+    };
+    const matrixLines = [...Object.entries(matrix).map(([k, v]) => `        ${k}: ${JSON.stringify(v)}`), grouped && changed && `        dir: ${listOf(group.id)}`].filter(Boolean);
+    const steps = stepsInDir(group.steps, grouped ? x('matrix.dir') : group.apps[0].dir);
+    blocks.push(
+      block(
+        `${group.id}.header`,
+        `${group.id}: job settings`,
+        [
+          `  ${group.id}:`,
+          changed && '    needs: changes',
+          changed && `    if: ${q(grouped ? some(group.id) : changedApp(group.apps[0]))}`,
+          `    runs-on: ${p.os.length ? x('matrix.os') : runner}`,
+          timeout,
+          matrixLines.length > 0 && ['    strategy:', `      fail-fast: ${p.failFast}`, '      matrix:', matrixLines],
+          p.os.some((o) => !o.startsWith('ubuntu')) && ['    defaults:', '      run:', '        shell: bash'],
+          when(p.services.length, '    services:', p.services.flatMap(service)),
+          when(p.services.length, '    env:', mapLines(Object.fromEntries(p.services.map((n) => serviceUrl(n, 'localhost', p.services))), '      ')),
+          '    steps:',
+        ],
+        false,
+      ),
+      ...stepBlocks(group.id, [{ key: 'checkout', uses: 'actions/checkout@v4' }, ...steps]),
+    );
+  }
 
   // -- lint-dockerfile
   if (p.lintDockerfile) {
     blocks.push(
-      block('lint-dockerfile.header', 'lint-dockerfile: job settings', ['  lint-dockerfile:', `    runs-on: ${runner}`, timeout, '    steps:']),
+      block('lint-dockerfile.header', 'lint-dockerfile: job settings', [
+        '  lint-dockerfile:',
+        changed && '    needs: changes',
+        changed && `    if: ${q(some('lint'))}`,
+        `    runs-on: ${runner}`,
+        timeout,
+        multi && ['    strategy:', '      fail-fast: false', '      matrix:', `        include: ${changed ? listOf('lint') : JSON.stringify(p.apps.map((a) => ({ service: a.id, dockerfile: inApp(a, 'Dockerfile') })))}`],
+        '    steps:',
+      ]),
       ...stepBlocks('lint-dockerfile', [
         { key: 'checkout', uses: 'actions/checkout@v4' },
-        { key: 'hadolint', uses: 'hadolint/hadolint-action@v3.1.0', with: { dockerfile: 'Dockerfile', 'failure-threshold': 'error' } },
+        { key: 'hadolint', uses: 'hadolint/hadolint-action@v3.1.0', with: { dockerfile: multi ? x('matrix.dockerfile') : inApp(p.apps[0], 'Dockerfile'), 'failure-threshold': 'error' } },
       ]),
     );
   }
-  const gates = [p.testJob && 'test', p.lintDockerfile && 'lint-dockerfile'].filter(Boolean);
+  const gates = [changed && 'changes', ...jobIds, p.lintDockerfile && 'lint-dockerfile'].filter(Boolean);
   const needsLine = (jobs) => (jobs.length ? `    needs: ${jobs.length > 1 ? `[${jobs.join(', ')}]` : jobs[0]}` : null);
 
   // -- image
   const multiArch = p.platforms.length > 1 || p.platforms.some((pl) => pl !== 'linux/amd64');
+  // With several services the image job is a matrix and every per-service value comes from the matrix entry.
+  const matrixApp = { id: x('matrix.service') };
+  const imageName = (template) => imageRepo(template, p, multi ? matrixApp : p.apps[0]);
   if (registry) {
     const tags = [...p.imageTags.filter((k) => k !== 'latest').flatMap((k) => IMAGE_TAGS[k]), 'type=sha,format=long', ...(p.imageTags.includes('latest') ? IMAGE_TAGS.latest : [])];
     blocks.push(
       block('image.header', 'image: job settings', [
         '  image:',
         needsLine(gates),
+        // Tests that were skipped because nothing changed must not stop the image jobs that did.
+        changed && `    if: ${q(`!cancelled() && !failure() && ${some('images')}`)}`,
         `    runs-on: ${runner}`,
         timeout,
         permissionLines(jobPermissions({ ...(p.registryId === 'builtin' && { packages: 'write' }), ...((p.oidc || p.sign) && { 'id-token': 'write' }) }), '    '),
-        '    outputs:',
-        `      image: ${x('steps.ref.outputs.image')}`,
+        multi
+          ? [
+              '    strategy:',
+              '      fail-fast: false',
+              '      matrix:',
+              `        include: ${changed ? listOf('images') : JSON.stringify(p.apps.map((a) => ({ service: a.id, dir: a.dir, ...(withArgs && { args: argNames(a) }) })))}`,
+            ]
+          : ['    outputs:', `      image: ${x('steps.ref.outputs.image')}`],
         '    steps:',
       ]),
       ...stepBlocks('image', [
@@ -193,7 +309,15 @@ function render(p, ciSteps) {
             'echo "name=$name" >> "$GITHUB_OUTPUT"',
             'echo "image=$name:sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"',
           ],
-          env: { IMAGE_NAME: registry.image.replace('{app}', appName) },
+          env: { IMAGE_NAME: imageName(registry.image) },
+        },
+        // Each service passes its own build args: the matrix names them, the step reads their values from the variables.
+        multi && withArgs && {
+          key: 'build-args',
+          title: 'Collect the build args',
+          id: 'args',
+          run: ['{', "  echo 'value<<DOCKCRATE_EOF'", '  for n in $ARG_NAMES; do printf \'%s=%s\\n\' "$n" "${!n}"; done', "  echo 'DOCKCRATE_EOF'", '} >> "$GITHUB_OUTPUT"'],
+          env: { ARG_NAMES: x('matrix.args'), ...Object.fromEntries([...new Set(p.apps.flatMap((a) => a.buildArgs))].map((n) => [n, x(`vars.${n}`)])) },
         },
         {
           key: 'metadata',
@@ -206,10 +330,10 @@ function render(p, ciSteps) {
           id: 'build',
           uses: 'docker/build-push-action@v6',
           with: {
-            context: '.',
+            context: multi ? x('matrix.dir') : p.apps[0].dir,
             ...(p.sbom && { sbom: 'true', provenance: 'mode=max' }),
             ...(p.platforms.length && { platforms: p.platforms.join(',') }),
-            ...(p.buildArgs.length && { 'build-args': p.buildArgs.map((n) => `${n}=${x(`vars.${n}`)}`).join('\n') }),
+            ...(withArgs && { 'build-args': multi ? x('steps.args.outputs.value') : p.apps[0].buildArgs.map((n) => `${n}=${x(`vars.${n}`)}`).join('\n') }),
             push: x(NOT_PR),
             tags: x('steps.meta.outputs.tags'),
             labels: x('steps.meta.outputs.labels'),
@@ -238,9 +362,20 @@ function render(p, ciSteps) {
   if (deploys) {
     const deployEnv = {
       APP: appName,
-      PORT: p.port,
-      ...(registry && { IMAGE: x('needs.image.outputs.image') }),
+      ...(!multi && { PORT: p.apps[0].port }),
+      // A matrix job has no single output, so with several services the deploy job works the image names out itself.
+      ...(registry && !multi && { IMAGE: x('needs.image.outputs.image') }),
       ...(target.usesRegistryEnv && registry.env),
+      ...(changed && { DEPLOY_SERVICES: out('changed') }),
+    };
+    const imageRefs = registry && multi && {
+      key: 'image-refs',
+      title: 'Compute the image names',
+      run: p.apps.flatMap((a) => [
+        `name=$(printf '%s' "$IMAGE_NAME_${a.key}" | tr '[:upper:]' '[:lower:]')`,
+        `echo "${a.imageEnv}=$name:sha-$GITHUB_SHA" >> "$GITHUB_ENV"`,
+      ]),
+      env: Object.fromEntries(p.apps.map((a) => [`IMAGE_NAME_${a.key}`, imageRepo(registry.image, p, a)])),
     };
     const needs = target.needs?.({ platform: 'github', oidc: p.oidc }) ?? { secrets: [], vars: [] };
     for (const name of needs.secrets) deployEnv[name] = x(`secrets.${name}`);
@@ -248,36 +383,43 @@ function render(p, ciSteps) {
       const name = raw.replace(/\?$/, '');
       deployEnv[name] = x(`vars.${name}`);
     }
-    blocks.push(
-      block('deploy.header', 'deploy: job settings', [
-        '  deploy:',
-        needsLine(registry ? ['image'] : gates),
-        `    if: ${q(DEPLOY_CONDITION[p.deployOn])}`,
-        `    runs-on: ${runner}`,
-        timeout,
-        p.environment && `    environment: ${p.environment}`,
-        '    concurrency:',
-        `      group: deploy-${p.environment || appName}`,
-        '      cancel-in-progress: false',
-        permissionLines(jobPermissions({ ...(target.usesRegistryEnv && !base.packages && { packages: 'read' }), ...(p.oidc && { 'id-token': 'write' }) }), '    '),
-        '    steps:',
-      ]),
-      ...stepBlocks('deploy', [
-        { key: 'checkout', uses: 'actions/checkout@v4' },
-        ...auth.map((s) => ({ key: 'cloud-login', ...s })),
-        ...(target.github?.prepare ?? []).map((s) => ({ key: 'prepare', ...s })),
-        { key: 'deploy', title: 'Deploy', run: target.script({ appName, port: p.port, composeFile: p.composeFile }), env: deployEnv },
-      ]),
-    );
+    for (const d of p.deployments) {
+      blocks.push(
+        block(`${d.id}.header`, `${d.id}: job settings`, [
+          `  ${d.id}:`,
+          needsLine(registry ? [...(changed ? ['changes'] : []), 'image'] : gates),
+          `    if: ${q(changed ? `(${deployCondition(p, d)}) && !cancelled() && !failure() && needs.changes.outputs.any == 'true'` : deployCondition(p, d))}`,
+          `    runs-on: ${runner}`,
+          timeout,
+          `    environment: ${d.name}`,
+          '    concurrency:',
+          `      group: deploy-${d.name}`,
+          '      cancel-in-progress: false',
+          permissionLines(jobPermissions({ ...(target.usesRegistryEnv && !base.packages && { packages: 'read' }), ...(p.oidc && { 'id-token': 'write' }) }), '    '),
+          '    steps:',
+        ]),
+        ...stepBlocks(d.id, [
+          { key: 'checkout', uses: 'actions/checkout@v4' },
+          ...auth.map((s) => ({ key: 'cloud-login', ...s })),
+          ...(target.github?.prepare ?? []).map((s) => ({ key: 'prepare', ...s })),
+          imageRefs,
+          { key: 'deploy', title: 'Deploy', run: target.script({ appName, port: p.apps[0].port, composeFile: p.composeFile, composeFiles: d.composeFiles, apps: p.apps, ...(changed && { changedOnly: true }) }), env: deployEnv },
+        ]),
+      );
+    }
   }
   return blocks;
 }
 
-/** CodeQL gets its own workflow file. */
-function codeqlFiles(p, stack) {
+/** CodeQL gets its own workflow file; with several languages the analysis is a matrix over them. */
+function codeqlFiles(p, stacks) {
   const stepBlocks = stepper(p);
-  if (!p.codeScan || !stack.codeql) return [];
+  const languages = [...new Set(stacks.map((s) => s.codeql).filter(Boolean))];
+  if (!p.codeScan || !languages.length) return [];
   const t = p.triggers;
+  const several = languages.length > 1;
+  const buildMode = (language) => (language === 'go' ? 'autobuild' : 'none');
+  const language = several ? x('matrix.language') : languages[0];
   return [
     {
       path: '.github/workflows/codeql.yml',
@@ -292,11 +434,19 @@ function codeqlFiles(p, stack) {
         ]),
         block('permissions', 'Token permissions', ['permissions:', '  contents: read']),
         block('jobs', 'Jobs', 'jobs:'),
-        block('analyze.header', 'analyze: job settings', ['  analyze:', `    runs-on: ${p.runner || 'ubuntu-latest'}`, '    permissions:', '      contents: read', '      security-events: write', '    steps:'], false),
+        block('analyze.header', 'analyze: job settings', [
+          '  analyze:',
+          `    runs-on: ${p.runner || 'ubuntu-latest'}`,
+          several && ['    strategy:', '      fail-fast: false', '      matrix:', `        include: ${JSON.stringify(languages.map((l) => ({ language: l, 'build-mode': buildMode(l) })))}`],
+          '    permissions:',
+          '      contents: read',
+          '      security-events: write',
+          '    steps:',
+        ], false),
         ...stepBlocks('analyze', [
           { key: 'checkout', uses: 'actions/checkout@v4' },
-          { key: 'init', uses: 'github/codeql-action/init@v3', with: { languages: stack.codeql, 'build-mode': stack.codeql === 'go' ? 'autobuild' : 'none' } },
-          { key: 'analyze', uses: 'github/codeql-action/analyze@v3', with: { category: `/language:${stack.codeql}` } },
+          { key: 'init', uses: 'github/codeql-action/init@v3', with: { languages: language, 'build-mode': several ? x("matrix['build-mode']") : buildMode(languages[0]) } },
+          { key: 'analyze', uses: 'github/codeql-action/analyze@v3', with: { category: `/language:${language}` } },
         ]),
       ],
     },

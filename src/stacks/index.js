@@ -8,10 +8,7 @@ import { php } from './php.js';
 import { ruby } from './ruby.js';
 
 /**
- * Detection order: specific server stacks first (a Django app may also carry a package.json for tooling),
- * then SPA frameworks, then the generic Node fallback.
- *
- * A stack provides: id, port, backend, ignore, detect(dir, opts) -> info|null, dockerfile(info, port),
- * ci(info, version = info.version) -> { image, steps }, and optionally files(info, port) and notes(info, port).
+ * A stack provides: id, port, backend, ignore, starter(opts) -> info, dockerfile(info, port, c, build), ci(info, version = info.version)
+ * -> { image, steps } (a step that belongs to a CI step carries `ciStep`: a manual run can switch it off), and optionally files(info, port, build), notes(info, port) and the other hooks described in CLAUDE.md.
  */
 export const STACKS = [django, fastapi, dotnet, java, go, rust, php, ruby, angular, vue, react, node];

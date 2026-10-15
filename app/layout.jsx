@@ -14,7 +14,7 @@ const socialImage = {
   alt: 'Dockcrate: Dockerfile, Compose, CI/CD and deployment config for any project.',
 };
 const LOCAL_DESCRIPTION =
-  'Generate a Dockerfile, docker-compose, CI/CD pipeline and deployment config for an existing or a new project. Runs locally; nothing leaves your machine.';
+  'Generate a Dockerfile, docker-compose, CI/CD pipeline and deployment config for a new project. Runs locally; nothing leaves your machine.';
 const HOSTED_DESCRIPTION =
   'Generate a Dockerfile, docker-compose, CI/CD pipeline and deployment config for a new project. Pick a stack, preview the files, then copy or download them.';
 
@@ -31,6 +31,7 @@ export async function generateMetadata() {
     authors: [{ name: 'Dockcrate' }],
     referrer: 'no-referrer',
     alternates: { canonical: '/' },
+    verification: { google: '7fuQzUlrmv1KCo50jYkC4ePEGz17z9zIaeza4ZLHl_E' },
     robots: { index: true, follow: true, googleBot: { index: true, follow: true, 'max-image-preview': 'large', 'max-snippet': -1 } },
     formatDetection: { telephone: false, email: false, address: false },
     openGraph: { type: 'website', siteName: 'Dockcrate', locale: 'en_US', url: '/', title, description, images: [socialImage] },
@@ -63,6 +64,9 @@ export const viewport = {
 // Runs before first paint so a saved theme does not flash the OS one.
 const THEME_SCRIPT = `try{var t=localStorage.getItem('dockcrate-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}`;
 
+// Both scripts are served by Vercel at /_vercel/*; anywhere else (`dockcrate serve`, `npm run dev`) they 404 and log console errors.
+const ON_VERCEL = Boolean(process.env.VERCEL);
+
 export default async function RootLayout({ children }) {
   const nonce = (await headers()).get('x-nonce') ?? undefined; // set by proxy.js; the CSP only runs scripts that carry it
   return (
@@ -72,8 +76,8 @@ export default async function RootLayout({ children }) {
       </head>
       <body>
         {children}
-        <Analytics />
-        <SpeedInsights />
+        {ON_VERCEL && <Analytics />}
+        {ON_VERCEL && <SpeedInsights />}
       </body>
     </html>
   );

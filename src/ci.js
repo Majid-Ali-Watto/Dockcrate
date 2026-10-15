@@ -1,4 +1,4 @@
-import { REGISTRIES, TARGETS } from './deploy.js';
+import { REGISTRIES, TARGETS, deployApps } from './deploy.js';
 import { DBS } from './compose.js';
 import { github, gitea } from './providers/github.js';
 import { gitlab } from './providers/gitlab.js';
@@ -6,6 +6,9 @@ import { jenkins } from './providers/jenkins.js';
 import { bitbucket } from './providers/bitbucket.js';
 import { azure } from './providers/azure.js';
 import { circleci } from './providers/circleci.js';
+import { CI_STEPS } from './providers/common.js';
+
+export { CI_STEPS };
 
 /** CI providers. Each renders the platform-neutral pipeline description from buildPipeline into named blocks. */
 export const CI_FILES = { github, gitlab, gitea, jenkins, bitbucket, azure, circleci };
@@ -35,6 +38,48 @@ export const targetInfo = () =>
     serverLogin: Boolean(t.usesRegistryEnv),
   }));
 
+/** Whether one of the trigger globs covers `name` (a plain name, or a prefix ending in `*`): ours are never more complex. */
+function covers(globs, name) {
+  const base = name.replace(/\*$/, '');
+  return globs.some((g) => {
+    const re = new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*?/g, '.*')}$`);
+    return re.test(name) || re.test(base);
+  });
+}
+
+const MATCH = /^[\w./-]+\*?$/;
+
+/** `name=on[:match]`, for example `qa=branch:develop` or `production=tag:v*`. */
+export function parseDeploySpec(spec) {
+  const m = /^([\w.-]+)=(branch|tag|manual)(?::([^:]+))?$/.exec(String(spec).trim());
+  if (!m) throw new Error(`invalid deployment "${spec}": use name=branch|tag|manual[:match], for example qa=branch:develop`);
+  return { name: m[1], on: m[2], ...(m[3] && { match: m[3] }) };
+}
+
+/**
+ * Where the pipeline deploys. One environment is the classic deploy job (`environment` and `deployOn`); `deployTo` lists several,
+ * each with its own rule: `branch` (the default branch, or `match`: a name or a prefix ending in *), `tag` (any tag, or `match`)
+ * or `manual`. Each gets its own job, in its own CI environment, with its own compose override when one exists.
+ */
+function parseDeployments(opts, composeFor) {
+  const given = opts.deployTo ?? [];
+  if (given.length && (opts.deployOn != null || opts.environment != null)) {
+    throw new Error('--deploy-to lists the environments itself: drop --deploy-on and --environment');
+  }
+  const specs = given.length ? given : [{ name: opts.environment ?? 'production', on: opts.deployOn ?? 'branch' }];
+  const names = new Set();
+  for (const d of specs) {
+    if (typeof d !== 'object' || d === null || !WORD.test(d.name ?? '')) throw new Error(`invalid environment "${d?.name}"`);
+    oneOf('deploy-on', [d.on], DEPLOY_ON);
+    if (d.match != null && (d.on === 'manual' || !MATCH.test(d.match))) {
+      throw new Error(d.on === 'manual' ? `environment ${d.name}: a manual deployment has no branch or tag to match` : `environment ${d.name}: match "${d.match}" must be a name or a prefix ending in *`);
+    }
+    if (names.has(d.name)) throw new Error(`environment ${d.name} is listed twice`);
+    names.add(d.name);
+  }
+  return specs.map((d) => ({ ...d, id: specs.length > 1 ? `deploy-${d.name}` : 'deploy', composeFiles: composeFor(d.name) }));
+}
+
 const GLOB = /^[\w./*-]+$/;
 const WORD = /^[\w.-]+$/;
 const CRON = /^[\w*/,-]+( [\w*/,-]+){4}$/;
@@ -53,7 +98,9 @@ const oneOf = (what, values, allowed) => check(what, values, (v) => allowed.incl
  * what must be created (secrets, variables) and about options the chosen provider cannot express. Nothing is switched on
  * or off behind your back: a setting that cannot work is reported, not rewritten.
  */
-export function buildPipeline(opts, { appName, port, composeFile, buildArgs = [] }) {
+export function buildPipeline(opts, { appName, composeFile, composeFor = () => [composeFile], apps: rawApps }) {
+  // The pipeline only needs the names of the build args; compose keeps their defaults.
+  const plainApps = rawApps.map((a) => ({ ...a, buildArgs: a.buildArgs.map((b) => b.name) }));
   const providerId = opts.ci ?? 'github';
   const provider = CI_FILES[providerId];
   const targetId = opts.deploy ?? 'registry';
@@ -61,13 +108,12 @@ export function buildPipeline(opts, { appName, port, composeFile, buildArgs = []
   if (!target) throw new Error(`unknown deploy target "${targetId}"; choose from: ${targetIds().join(', ')}`);
   const notes = [];
 
-  const deployOn = opts.deployOn ?? 'branch';
   const concurrency = opts.concurrency ?? 'prs';
   const permissions = list(opts.permissions ?? []);
-  const versions = list(opts.testVersions ?? []);
   const os = list(opts.testOs ?? []);
   const platforms = list(opts.platforms ?? []);
-  const environment = opts.environment ?? 'production';
+  const deployments = parseDeployments(opts, composeFor);
+  const { on: deployOn, name: environment } = deployments[0];
   const services = list(opts.ciServices ?? []);
   const imageTags = opts.imageTags == null ? ['branch', 'tag', 'latest'] : list(opts.imageTags);
   const scanSeverity = opts.scanSeverity == null ? ['HIGH', 'CRITICAL'] : list(opts.scanSeverity);
@@ -80,7 +126,6 @@ export function buildPipeline(opts, { appName, port, composeFile, buildArgs = []
     return [key, item.slice(at + 1)];
   });
 
-  oneOf('deploy-on', [deployOn], DEPLOY_ON);
   oneOf('concurrency', [concurrency], CONCURRENCY);
   oneOf('permission', permissions, PERMISSIONS);
   oneOf('test OS', os, TEST_OS);
@@ -91,8 +136,7 @@ export function buildPipeline(opts, { appName, port, composeFile, buildArgs = []
   if (os.some((o) => !o.startsWith('ubuntu')) && services.length) {
     throw new Error('CI service containers need Linux runners: remove the Windows/macOS test runners');
   }
-  check('test version', versions, (v) => WORD.test(v));
-  check('environment', [environment], (v) => WORD.test(v));
+  for (const app of plainApps) check('test version', app.versions, (v) => WORD.test(v));
   if (runner) check('runner', [runner], (v) => WORD.test(v));
   if (timeout && !(Number.isInteger(timeout) && timeout > 0 && timeout <= 1440)) throw new Error(`invalid timeout "${opts.timeout}": minutes, 1-1440`);
   const workflowName = opts.pipelineName ?? 'CI';
@@ -176,10 +220,25 @@ export function buildPipeline(opts, { appName, port, composeFile, buildArgs = []
   const hasImage = Boolean(registryId);
   const lintDockerfile = Boolean(opts.lintDockerfile);
   const testJob = opts.testJob !== false;
+  const manualSteps = testJob && triggers.manual && provider.features.includes('manual') ? Object.keys(CI_STEPS).filter((step) => plainApps.some((a) => a.selected.includes(step))) : [];
   if (deploys) {
-    if (deployOn === 'tag' && !triggers.tags.length && !triggers.tagsIgnore.length) notes.push('Deploying on tags, but no tag trigger is enabled: the deploy job will never run until you add one.');
-    if (deployOn === 'manual' && !triggers.manual && providerId === 'github') notes.push('Deploying manually, but the manual-run trigger is off: the deploy job will never run until you turn it on.');
-    if (deployOn === 'branch' && !triggers.branches.length) notes.push('Deploying from the default branch, but no branch push trigger is enabled: the deploy job will not run.');
+    for (const d of deployments) {
+      const where = deployments.length > 1 ? `${d.name}: ` : '';
+      if (d.on === 'tag' && !triggers.tags.length && !triggers.tagsIgnore.length) notes.push(`${where}Deploying on tags, but no tag trigger is enabled: the deploy job will never run until you add one.`);
+      if (d.on === 'manual' && !triggers.manual && providerId === 'github') notes.push(`${where}Deploying manually, but the manual-run trigger is off: the deploy job will never run until you turn it on.`);
+      if (d.on === 'branch' && !triggers.branches.length) notes.push(`${where}Deploying from ${d.match ? d.match : 'the default branch'}, but no branch push trigger is enabled: the deploy job will not run.`);
+      if (d.on === 'branch' && d.match && triggers.branches.length && !covers(triggers.branches, d.match)) {
+        notes.push(`${where}Deploying from ${d.match}, which is not one of the pushed branches (${triggers.branches.join(', ')}): add it to the branch triggers or the deploy job will not run.`);
+      }
+      if (d.on === 'tag' && d.match && triggers.tags.length && !covers(triggers.tags, d.match)) {
+        notes.push(`${where}Deploying tags ${d.match}, which the tag triggers (${triggers.tags.join(', ')}) do not cover: the deploy job will not run for them.`);
+      }
+    }
+    if (deployments.length > 1) {
+      notes.push(
+        `Deployments (${deployments.map((d) => d.name).join(', ')}) run the same script in their own ${provider.label} environment: keep the secret and variable names and give each environment its own values (GitHub and GitLab scope them per environment; elsewhere use one set of names per pipeline or separate variable groups).`,
+      );
+    }
   }
   if ((sbom || sign) && !hasImage) {
     notes.push('SBOM, provenance and image signing skipped: this target builds the image on the platform itself.');
@@ -188,9 +247,26 @@ export function buildPipeline(opts, { appName, port, composeFile, buildArgs = []
   if (lintDockerfile) notes.push('Hadolint fails the pipeline on errors only; warnings (e.g. unpinned apk/apt packages) are shown but allowed.');
   const scan = Boolean(opts.scan) && hasImage;
   if (opts.scan && !hasImage) notes.push('Image scan skipped: this target builds the image on the platform itself, so there is nothing to scan in CI.');
+  const buildArgs = [...new Set(plainApps.flatMap((a) => a.buildArgs))];
   if (buildArgs.length) {
     notes.push(`Build args ${buildArgs.join(', ')} are read from ${provider.variablesName ?? `${provider.label} variables`} of the same name.`);
   }
+  const apps = deployApps(appName, plainApps);
+  const sharedPaths = list(opts.sharedPaths ?? []);
+  check('shared path', sharedPaths, (v) => GLOB.test(v));
+  const changedOnly = Boolean(opts.changedOnly) && apps.length > 1;
+  if (opts.changedOnly && apps.length < 2) notes.push('Building only what changed was ignored: there is a single service.');
+  if (changedOnly) {
+    notes.push(
+      `Only the services whose folder changed are tested, built and deployed (a change in ${[provider.path, ...sharedPaths].join(', ')} rebuilds all). Tags, schedules and manual runs always do everything, and so does a run that cannot tell what changed (a new branch, a shallow clone), so the first deploy is a full one. Deploy-time changes in unchanged services are not redeployed until they change.`,
+    );
+  }
+  if (apps.length > 1 && hasImage) {
+    notes.push(
+      `Each service gets its own image: ${apps.map((a) => a.id).join(', ')}. Registries that name a repository per app use <project>-<service>; the others add /<service> to the repository.`,
+    );
+  }
+  if (apps.length > 1 && deploys) notes.push(...[target.multiNote].filter(Boolean));
 
   // Everything the pipeline reads: the target's own variables, and the registry login when one is chosen for it.
   const ctx = { platform: providerId, oidc };
@@ -212,7 +288,6 @@ export function buildPipeline(opts, { appName, port, composeFile, buildArgs = []
     triggers,
     concurrency,
     permissions: hasPermissions ? permissions : [],
-    versions,
     os: provider.features.includes('os') ? os : [],
     platforms: provider.features.includes('platforms') ? platforms : platforms.slice(0, 1),
     runner: provider.features.includes('runner') ? runner : '',
@@ -225,6 +300,7 @@ export function buildPipeline(opts, { appName, port, composeFile, buildArgs = []
     layerCache: opts.layerCache !== false,
     scanSeverity,
     testJob,
+    manualSteps,
     targetId,
     target,
     registryId,
@@ -237,12 +313,14 @@ export function buildPipeline(opts, { appName, port, composeFile, buildArgs = []
     codeScan,
     deployOn,
     environment,
+    deployments,
     oidc,
     services: provider.features.includes('services') ? services : [],
     scan,
-    buildArgs,
+    apps,
+    changedOnly,
+    sharedPaths,
     appName,
-    port,
     composeFile,
     notes,
   };

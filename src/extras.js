@@ -1,17 +1,24 @@
 // Optional repository files that go beyond the container and pipeline: dependency updates, a dev container,
 // a Makefile and an .editorconfig. All of them belong to the "repo" file group and are opt-in (`opts.extras`).
 import { lines } from './fsutil.js';
+import { isDevEnv, overrideName } from './compose.js';
 
 export const EXTRAS = ['dependabot', 'devcontainer', 'makefile', 'editorconfig'];
 
-function dependabot(stack, info) {
-  const ecosystems = [stack.ecosystem?.(info), 'docker', 'github-actions'].filter(Boolean);
+const slash = (dir) => (dir === '.' ? '/' : `/${dir}`);
+
+function dependabot(units) {
+  const seen = new Set();
+  const entries = [
+    ...units.flatMap((u) => [u.stack.ecosystem?.(u.info), 'docker'].filter(Boolean).map((name) => ({ name, dir: slash(u.dir) }))),
+    { name: 'github-actions', dir: '/' },
+  ].filter((e) => !seen.has(`${e.name} ${e.dir}`) && seen.add(`${e.name} ${e.dir}`));
   return lines(
     'version: 2',
     'updates:',
-    ecosystems.map((name) => [
-      `  - package-ecosystem: ${name}`,
-      '    directory: "/"',
+    entries.map((e) => [
+      `  - package-ecosystem: ${e.name}`,
+      `    directory: "${e.dir}"`,
       '    schedule:',
       '      interval: weekly',
       '    groups:',
@@ -41,20 +48,23 @@ function devcontainer(stack, info, { appName, port }) {
   );
 }
 
-const makefile = ({ appName, port, composeFile }) =>
-  lines(
+const makefile = ({ appName, units, composeFile, envs }) => {
+  const multi = units.length > 1;
+  const image = (u) => (multi ? `$(IMAGE)-${u.name}` : '$(IMAGE)');
+  const overlay = (e) => `-f ${composeFile} -f ${overrideName(composeFile, e)}`;
+  const [first] = units;
+  return lines(
     `IMAGE ?= ${appName}`,
     '',
-    '.PHONY: build run up down logs lint-docker scan',
+    `.PHONY: build ${multi ? '' : 'run '}up down logs lint-docker scan${envs.map((e) => ` up-${e}`).join('')}`,
     '',
     'build:',
-    '\tdocker build -t $(IMAGE) .',
-    '',
-    'run: build',
-    `\tdocker run --rm -p ${port}:${port} $(IMAGE)`,
+    units.map((u) => `\tdocker build -t ${image(u)} ${u.dir}`),
+    !multi && ['', 'run: build', `\tdocker run --rm -p ${first.port}:${first.port} $(IMAGE)`],
     '',
     'up:',
     `\tdocker compose -f ${composeFile} up --build -d`,
+    envs.map((e) => ['', `up-${e}:`, `\tdocker compose ${overlay(e)} up --build${isDevEnv(e) ? '' : ' -d'}`]),
     '',
     'down:',
     `\tdocker compose -f ${composeFile} down`,
@@ -63,11 +73,12 @@ const makefile = ({ appName, port, composeFile }) =>
     `\tdocker compose -f ${composeFile} logs -f`,
     '',
     'lint-docker:',
-    '\tdocker run --rm -i hadolint/hadolint < Dockerfile',
+    units.map((u) => `\tdocker run --rm -i hadolint/hadolint < ${u.prefix}Dockerfile`),
     '',
     'scan: build',
-    '\tdocker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.69.3 image --severity HIGH,CRITICAL $(IMAGE)',
+    units.map((u) => `\tdocker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.69.3 image --severity HIGH,CRITICAL ${image(u)}`),
   );
+};
 
 const editorconfig = () =>
   lines(
@@ -92,23 +103,25 @@ const editorconfig = () =>
   );
 
 /** [{ path, content, note? }] for the selected extras; `provider` decides between Dependabot and Renovate. */
-export function extraFiles(selected, { stack, info, provider, appName, port, composeFile }) {
+export function extraFiles(selected, { units, provider, appName, composeFile, envs = [] }) {
   const files = [];
   const notes = [];
   for (const name of selected) {
     if (name === 'dependabot') {
-      if (provider === 'github') files.push({ path: '.github/dependabot.yml', content: dependabot(stack, info) });
+      if (provider === 'github') files.push({ path: '.github/dependabot.yml', content: dependabot(units) });
       else {
         files.push({ path: 'renovate.json', content: renovate() });
         notes.push('Dependabot is GitHub-only, so a Renovate config was generated; install the Renovate app/bot on the repository.');
       }
     }
     if (name === 'devcontainer') {
-      const content = devcontainer(stack, info, { appName, port });
+      const [only] = units;
+      const content = units.length === 1 ? devcontainer(only.stack, only.info, { appName, port: only.port }) : null;
       if (content) files.push({ path: '.devcontainer/devcontainer.json', content });
-      else notes.push(`No dev container image is known for ${stack.id}; the dev container file was skipped.`);
+      else if (units.length > 1) notes.push('A dev container targets one stack, so none was generated for several services; use the dev environment of the compose file instead.');
+      else notes.push(`No dev container image is known for ${only.stack.id}; the dev container file was skipped.`);
     }
-    if (name === 'makefile') files.push({ path: 'Makefile', content: makefile({ appName, port, composeFile }) });
+    if (name === 'makefile') files.push({ path: 'Makefile', content: makefile({ appName, units, composeFile, envs }) });
     if (name === 'editorconfig') files.push({ path: '.editorconfig', content: editorconfig() });
   }
   return { files: files.map((f) => ({ kind: 'repo', ...f })), notes };
