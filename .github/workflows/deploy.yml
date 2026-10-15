@@ -1,0 +1,103 @@
+name: CI/CD
+
+# Pull requests: test and build only.
+# main: test, build the image and push it to Vercel Container Registry (VCR), then deploy that exact image to Vercel.
+# Vercel's own Git deployments are off (vercel.json), so this workflow is the only way the site is deployed.
+#
+# Repository settings (Settings > Secrets and variables > Actions):
+#   variables: VERCEL_TEAM_ID (team_...), VERCEL_TEAM_SLUG, VERCEL_PROJECT_ID (prj_...), VERCEL_PROJECT_NAME
+#   secret:    VERCEL_TOKEN (Account Tokens page)
+# On the Vercel team, a VCR OIDC policy with read-write access to the project lets the push below log in without a stored key.
+# The Vercel project's framework preset must be "Other", and its environment needs PORT=80 or whatever the image listens on.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # One image per commit: the tag is the commit, so a deployment always names exactly what was tested.
+  IMAGE: vcr.vercel.com/${{ vars.VERCEL_TEAM_SLUG }}/${{ vars.VERCEL_PROJECT_NAME }}/dockcrate:${{ github.sha }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: node --test
+      - run: npx next build
+
+  image:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC token for the VCR login
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: vercel/vcr-action/login@6888f841cb0d2255ef9dab40f068cba07234ef47 # v1
+        with:
+          team: ${{ vars.VERCEL_TEAM_ID }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          provenance: false # VCR's optimizer rejects attestations
+          sbom: false
+          tags: ${{ env.IMAGE }}
+          outputs: type=image,push=true,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
+      # Only an optimized image can be run by Vercel, so the deploy waits for it.
+      - uses: vercel/vcr-action/wait-for-optimized-image@6888f841cb0d2255ef9dab40f068cba07234ef47 # v1
+        with:
+          image: ${{ env.IMAGE }}
+          timeout-seconds: 600
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ vars.VERCEL_TEAM_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      # `vercel build` pulls the image below, so the runner needs the same VCR login as the push.
+      - uses: vercel/vcr-action/login@6888f841cb0d2255ef9dab40f068cba07234ef47 # v1
+        with:
+          team: ${{ vars.VERCEL_TEAM_ID }}
+      # Vercel has no "deploy this image" flag: a deployment is built from a Dockerfile.vercel, so the deployed
+      # project is just that file pointing at the image tested and pushed above. No source code is uploaded.
+      # USER root and PORT=80 because Vercel sends traffic to port 80 unless the project sets PORT.
+      - name: Deploy the image
+        run: |
+          mkdir deploy
+          printf '%s\n' '{"framework":null}' > deploy/vercel.json
+          printf 'FROM %s\nUSER root\nENV PORT=80\n' "$IMAGE" > deploy/Dockerfile.vercel
+          cd deploy
+          npx --yes vercel@59.26.0 pull --yes --environment=production --token "$VERCEL_TOKEN"
+          npx --yes vercel@59.26.0 build --prod --token "$VERCEL_TOKEN"
+          npx --yes vercel@59.26.0 deploy --prebuilt --prod --token "$VERCEL_TOKEN"

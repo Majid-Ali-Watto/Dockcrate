@@ -184,9 +184,17 @@ Each run lists exactly which secrets and variables to create. Ticking `id-token:
 
 ## Deploying to Vercel
 
-Import the repo in Vercel; the Next.js preset needs no settings (Node 20.9 or newer). Nothing is required, and `SITE_URL` is optional (see `.env.example`).
+The site is deployed by CI/CD, not by Vercel's Git integration (`vercel.json` sets `git.deploymentEnabled` to `false`). On every push to `main`, `.github/workflows/deploy.yml` tests, builds the `Dockerfile`, pushes the image to Vercel Container Registry (`vcr.vercel.com/<team>/<project>/dockcrate:<commit>`), waits for VCR to optimize it, and deploys that image. Pull requests only test and build.
 
-A server you don't own has no project folders, so the hosted site runs in **hosted mode** (switched on by Vercel's `VERCEL` variable, or by `DOCKCRATE_HOSTED=1` on another host):
+Vercel has no "deploy this image" flag, so the deploy step is a `Dockerfile.vercel` (`FROM` the pushed image) built from an otherwise empty folder: what runs is exactly the image that was pushed. To set it up:
+
+- GitHub variables `VERCEL_TEAM_ID`, `VERCEL_TEAM_SLUG`, `VERCEL_PROJECT_ID`, `VERCEL_PROJECT_NAME`, and the secret `VERCEL_TOKEN`; a GitHub environment named `production`;
+- on the Vercel team, a VCR OIDC policy with read-write access to the project (the push logs in with GitHub OIDC, no stored key);
+- on the Vercel project, the framework preset "Other"; `SITE_URL` is optional (see `.env.example`).
+
+The image sets `DOCKCRATE_HOSTED=1` itself (a container may not get Vercel's `VERCEL` variable). `docker run -p 3000:3000` works anywhere else.
+
+A server you don't own has no project folders, so the hosted site runs in **hosted mode** (switched on by Vercel's `VERCEL` variable, or by `DOCKCRATE_HOSTED=1`, which the `Dockerfile` sets):
 
 - pick a stack and options, then copy, download (.zip) or edit the files;
 - folder browsing and writing to a folder are refused by the API (and hidden in the UI), and no server path is ever sent to the browser;
@@ -236,6 +244,7 @@ src/                  the generator (plain ESM, no dependencies)
 app/                  Next.js (App Router): page, /api/generate, /api/browse, metadata (layout, manifest, robots, sitemap, icons), loading skeleton
 components/ lib/      UI (React client components, form state, diff, zip, grouping files by service, site origin)
 proxy.js              per-request Content-Security-Policy (nonce)
+Dockerfile            the hosted site image; .github/workflows/deploy.yml tests, pushes it to VCR and deploys it; vercel.json turns Vercel's Git deploys off
 public/               logo, social image, PNG icons (generated)
 scripts/              build-icons.mjs (`npm run icons`, needs Chrome) and update-pins.mjs (`npm run pins`, needs git and network)
 test/                 node:test: generator, API, services, events, networks, image build modes, zip
