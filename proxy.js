@@ -3,11 +3,12 @@ import { NextResponse } from 'next/server';
 /** Per-request Content-Security-Policy: only our own files and Next's nonce'd inline scripts may run. */
 export function proxy(request) {
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
-  const dev = process.env.NODE_ENV !== 'production'; // React's dev tooling needs eval and the HMR socket
+  // Next's dev tooling (the overlay and the dev indicator) needs eval, the HMR socket and inline styles; none of it exists in production.
+  const dev = process.env.NODE_ENV !== 'production';
   const csp = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'${dev ? " 'unsafe-eval'" : ''}`,
-    "style-src 'self'",
+    `style-src 'self'${dev ? " 'unsafe-inline'" : ''}`,
     "img-src 'self' data:",
     `connect-src 'self'${dev ? ' ws:' : ''}`,
     "object-src 'none'",

@@ -16,14 +16,14 @@ const clip = (text) => (text.length > 60 ? `${text.slice(0, 57)}…` : text);
 export function splitBlocks(path, content) {
   const text = content.replace(/\n+$/, '');
   if (path.endsWith('.json')) return [{ id: 'file', title: path, gap: false, text }];
-  if (path === '.dockerignore' || path === '.env.example' || path === '.editorconfig') {
+  if (/(^|\/)(\.dockerignore|\.env\.example|\.editorconfig)$/.test(path)) {
     return text.split('\n').map((line, i) => ({ id: `line-${i}-${slug(line)}`, title: clip(line) || '(blank)', gap: false, text: line }));
   }
   const seen = new Map();
   return text.split(/\n{2,}/).map((paragraph, i) => {
     let id;
     let title = clip(paragraph.split('\n').find((l) => l.trim() && !l.startsWith('# syntax')) ?? paragraph);
-    if (/(^|\/)Dockerfile$/.test(path)) {
+    if (/(^|\/)Dockerfile(\.[\w.-]+)?$/.test(path)) {
       const from = paragraph.match(/^FROM\s+\S+(?:\s+AS\s+(\S+))?/im);
       if (from) {
         id = `stage:${from[1] ?? seen.size + 1}`;

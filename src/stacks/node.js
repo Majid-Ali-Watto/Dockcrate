@@ -1,5 +1,5 @@
-import { has, read, readJson, firstInt, lines } from '../fsutil.js';
-import { apk, argLines, envLines, healthcheck } from '../container.js';
+import { lines } from '../fsutil.js';
+import { DEFAULT_BUILD, argLines, envLines, healthcheck, pkgs } from '../container.js';
 
 const LOCKFILES = { npm: 'package-lock.json', yarn: 'yarn.lock', pnpm: 'pnpm-lock.yaml' };
 const IGNORE = ['**/node_modules', 'dist', 'build', 'coverage', '.angular', '.next', 'npm-debug.log*'];
@@ -10,24 +10,8 @@ function install({ pm, hasLock }, prod = false) {
   return `${pm} install --frozen-lockfile${prod ? (pm === 'yarn' ? ' --production' : ' --prod') : ''}`;
 }
 
-function inspect(dir, opts) {
-  const pkg = readJson(dir, 'package.json');
-  if (!pkg) return null;
-  const pm = has(dir, LOCKFILES.pnpm) ? 'pnpm' : has(dir, LOCKFILES.yarn) ? 'yarn' : 'npm';
-  const scripts = pkg.scripts ?? {};
-  return {
-    pkg,
-    pm,
-    scripts,
-    deps: { ...pkg.dependencies, ...pkg.devDependencies },
-    hasLock: has(dir, LOCKFILES[pm]),
-    version: opts.runtime ?? firstInt(pkg.engines?.node) ?? firstInt(read(dir, '.nvmrc')) ?? '24',
-    hasTest: Boolean(scripts.test) && !/no test specified/.test(scripts.test),
-  };
-}
-
 /**
- * Info for a project that does not exist yet. The scripts a CI step might call are assumed to exist (the user
+ * Info for the project: the scripts a CI step might call are assumed to exist (the user
  * decides which steps to enable), `build` only when the project has a build step, and the lockfile is committed.
  */
 function starter(opts, { build, start = false }) {
@@ -86,11 +70,34 @@ function ci(i, selected, v = i.version, { testArgs = '' } = {}) {
         with: { 'node-version': v, ...(i.hasLock && { cache: pm }) },
       },
       { run: install(i) },
-      on('lint') && { run: `${pm} run lint` },
-      on('test') && { run: test },
-      on('build') && { run: `${pm} run build` },
-      on('audit') && { run: AUDIT[pm] },
+      on('lint') && { run: `${pm} run lint`, ciStep: 'lint' },
+      on('test') && { run: test, ciStep: 'test' },
+      on('build') && { run: `${pm} run build`, ciStep: 'build' },
+      on('audit') && { run: AUDIT[pm], ciStep: 'audit' },
     ],
+  };
+}
+
+/** Development image for any Node project: dev dependencies, the source bind mounted over /app, node_modules kept in the image. */
+function nodeDev(i, port, c, cmd) {
+  return {
+    dockerfile: lines(
+      SYNTAX,
+      `FROM node:${i.version}-alpine`,
+      'WORKDIR /app',
+      corepack(i),
+      pkgs(c, 'alpine'),
+      manifest(i),
+      `RUN ${install(i)}`,
+      'COPY . .',
+      `ENV PORT=${port} HOST=0.0.0.0 NODE_ENV=development`,
+      envLines(c),
+      `EXPOSE ${port}`,
+      `CMD ${JSON.stringify(cmd)}`,
+    ),
+    workdir: '/app',
+    mode: 'mount',
+    volumes: ['/app/node_modules'],
   };
 }
 
@@ -121,8 +128,13 @@ function nginxConf(port) {
   );
 }
 
+const probeOf = (v) => (v === 'alpine' ? 'wget' : 'node');
+/** What `.dockerignore` leaves out; a production-only image copies the build output, so that must not be ignored. */
+const ignoreFor = (b) => (b.mode === 'production' ? IGNORE.filter((e) => !['dist', 'build', '.next'].includes(e)) : IGNORE);
+const prebuilt = (i, what) => i.scripts.build && `Production only: the image copies ${what}, so run \`${i.pm} run build\` before \`docker build\` (the generated pipeline builds the image from the repository as it is).`;
+
 /** Static single-page app: build with node, serve with unprivileged nginx. */
-const spa = (id, { match, buildDir, starterDir, testArgs = '', usesName = false }) => ({
+const spa = (id, { starterDir, testArgs = '', usesName = false }) => ({
   id,
   port: 8080,
   backend: false,
@@ -131,28 +143,50 @@ const spa = (id, { match, buildDir, starterDir, testArgs = '', usesName = false 
   usesBuildArgs: true,
   usesPackages: false,
   ecosystem: () => 'npm',
+  variants: ['alpine', 'slim'],
+  defaultVariant: 'alpine',
+  healthKind: (b) => (b.mode === 'mixed' ? probeOf(b.variant) : b.variant === 'alpine' ? 'wget' : 'curl'),
   codeql: 'javascript-typescript',
   devcontainer: (i) => `mcr.microsoft.com/devcontainers/javascript-node:1-${i.version}`,
   ciSteps: CI_STEPS,
   ciDefaults: (i) => ciDefaults(i, { test: !testArgs }),
   ciNotes: (i, selected) => ciNotes(i, selected, { testArgs }),
-  ignore: IGNORE,
-  detect(dir, opts) {
-    const i = inspect(dir, opts);
-    if (!i || !match(i.deps)) return null;
-    i.buildDir = cleanDir(opts.buildDir ?? buildDir(dir, i));
-    return i;
-  },
+  ignore: (b) => ignoreFor(b),
   starter(opts) {
     const i = starter(opts, { build: true });
     i.buildDir = cleanDir(opts.buildDir ?? starterDir(opts));
     return i;
   },
   assumes: (i) => `a "build" script that writes to ${i.buildDir}/ (Vite-style; use the build folder option otherwise)`,
-  dockerfile: (i, port, c) =>
-    lines(
+  dockerfile(i, port, c, b = DEFAULT_BUILD) {
+    const v = b.variant ?? 'alpine';
+    const web = v === 'alpine' ? 'nginxinc/nginx-unprivileged:alpine' : 'nginxinc/nginx-unprivileged:bookworm';
+    const probe = v === 'alpine' ? 'wget' : 'curl';
+    if (b.mode === 'mixed') {
+      // One image: node builds the site and `serve` hands it out (no nginx, so no nginx.conf).
+      return lines(
+        SYNTAX,
+        `FROM node:${i.version}-${v}`,
+        'WORKDIR /app',
+        corepack(i),
+        manifest(i),
+        `RUN ${install(i)}`,
+        'COPY . .',
+        argLines(c),
+        buildStep(i),
+        'RUN npm install --global serve@14',
+        'USER node',
+        `EXPOSE ${port}`,
+        healthcheck(c, port, probeOf(v)),
+        `CMD ${JSON.stringify(['serve', '-s', i.buildDir, '-l', String(port)])}`,
+      );
+    }
+    if (b.mode === 'production') {
+      return lines(SYNTAX, `FROM ${web}`, 'COPY nginx.conf /etc/nginx/conf.d/default.conf', `COPY ${i.buildDir}/ /usr/share/nginx/html/`, `EXPOSE ${port}`, healthcheck(c, port, probe));
+    }
+    return lines(
       SYNTAX,
-      `FROM node:${i.version}-alpine AS build`,
+      `FROM node:${i.version}-${v} AS build`,
       'WORKDIR /app',
       corepack(i),
       manifest(i),
@@ -161,14 +195,26 @@ const spa = (id, { match, buildDir, starterDir, testArgs = '', usesName = false 
       argLines(c),
       buildStep(i),
       '',
-      'FROM nginxinc/nginx-unprivileged:alpine',
+      `FROM ${web}`,
       'COPY nginx.conf /etc/nginx/conf.d/default.conf',
       `COPY --from=build /app/${i.buildDir}/ /usr/share/nginx/html/`,
       `EXPOSE ${port}`,
-      healthcheck(c, port, 'wget'),
-    ),
-  files: (i, port) => [{ path: 'nginx.conf', content: nginxConf(port) }],
+      healthcheck(c, port, probe),
+    );
+  },
+  // The dev server listens on the same port as the nginx image, so one compose port mapping serves both.
+  dev(i, port, c) {
+    // A project that defines no dev script is a Vite one (dev), except Angular (ng serve is `start`).
+    const script = i.scripts.dev ? 'dev' : i.scripts.start ? 'start' : id === 'angular' ? 'start' : 'dev';
+    const args = ['--host', '0.0.0.0', '--port', String(port)];
+    return nodeDev(i, port, c, [i.pm, 'run', script, ...(i.pm === 'npm' ? ['--', ...args] : args)]);
+  },
+  files: (i, port, b = DEFAULT_BUILD) => (b.mode === 'mixed' ? [] : [{ path: 'nginx.conf', content: nginxConf(port) }]),
   ci: (i, v, selected) => ci(i, selected, v, { testArgs }),
+  buildNotes: (i, b) => [
+    b.mode === 'production' && prebuilt(i, `${i.buildDir}/`),
+    b.mode === 'mixed' && 'Build and production in one image: node builds the site and `serve` (installed globally) serves it; the image keeps node, your dependencies and the sources.',
+  ],
   notes: (i, port, c) => [
     `Serving the static build from ${i.buildDir}/ (override with the build folder option).`,
     c.buildArgs.length === 0 &&
@@ -177,69 +223,19 @@ const spa = (id, { match, buildDir, starterDir, testArgs = '', usesName = false 
   ],
 });
 
-function angularBuildDir(dir) {
-  const config = readJson(dir, 'angular.json');
-  const [name, project] = Object.entries(config?.projects ?? {})[0] ?? [];
-  const build = project?.architect?.build ?? project?.targets?.build;
-  const out = build?.options?.outputPath;
-  const base = (typeof out === 'string' ? out : out?.base) ?? `dist/${name}`;
-  const browser =
-    typeof out === 'object' ? (out.browser ?? 'browser') : /:application$/.test(build?.builder ?? '') ? 'browser' : '';
-  return browser ? `${base}/${browser}` : base;
-}
-
 export const angular = spa('angular', {
-  match: (deps) => '@angular/core' in deps,
-  buildDir: angularBuildDir,
   starterDir: (opts) => `dist/${opts.name ?? 'app'}/browser`,
   usesName: true,
   testArgs: '--watch=false --browsers=ChromeHeadless',
 });
 
 export const vue = spa('vue', {
-  match: (deps) => 'vue' in deps && !('nuxt' in deps),
-  buildDir: () => 'dist',
   starterDir: () => 'dist',
 });
 
 export const react = spa('react', {
-  match: (deps) => 'react' in deps && !('next' in deps) && !('react-native' in deps),
-  buildDir: (dir, i) => ('react-scripts' in i.deps ? 'build' : 'dist'),
   starterDir: () => 'dist',
 });
-
-const NEXT_CONFIGS = ['next.config.js', 'next.config.mjs', 'next.config.cjs', 'next.config.ts', 'next.config.mts'];
-const NEXT_STANDALONE = /output\s*:\s*['"`]standalone['"`]/;
-
-/** Next.js with `output: 'standalone'`: ship only the traced server, static assets and public/ (a fraction of the size). */
-function nextStandalone(i, port, c) {
-  return lines(
-    SYNTAX,
-    `FROM node:${i.version}-alpine AS base`,
-    'WORKDIR /app',
-    corepack(i),
-    '',
-    'FROM base AS build',
-    'ENV NEXT_TELEMETRY_DISABLED=1',
-    manifest(i),
-    `RUN ${install(i)}`,
-    'COPY . .',
-    argLines(c),
-    buildStep(i),
-    '',
-    'FROM base AS runtime',
-    `ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=${port} HOSTNAME=0.0.0.0`,
-    envLines(c),
-    apk(c),
-    i.hasPublic && 'COPY --from=build --chown=node:node /app/public ./public',
-    'COPY --from=build --chown=node:node /app/.next/standalone ./',
-    'COPY --from=build --chown=node:node /app/.next/static ./.next/static',
-    'USER node',
-    `EXPOSE ${port}`,
-    healthcheck(c, port, 'wget'),
-    'CMD ["node","server.js"]',
-  );
-}
 
 /** Any Node server (Express, Fastify, Nest, Next.js, ...). Also the fallback for other package.json projects. */
 export const node = {
@@ -252,31 +248,69 @@ export const node = {
   usesBuildArgs: true,
   usesPackages: true,
   ecosystem: () => 'npm',
+  variants: ['alpine', 'slim'],
+  defaultVariant: 'alpine',
+  healthKind: (b) => probeOf(b.variant),
   codeql: 'javascript-typescript',
   devcontainer: (i) => `mcr.microsoft.com/devcontainers/javascript-node:1-${i.version}`,
   ciSteps: CI_STEPS,
   ciDefaults: (i) => ciDefaults(i),
   ciNotes: (i, selected) => ciNotes(i, selected, {}),
-  ignore: IGNORE,
-  detect(dir, opts) {
-    const i = inspect(dir, opts);
-    if (i && 'next' in i.deps) {
-      i.next = true;
-      i.standalone = NEXT_STANDALONE.test(NEXT_CONFIGS.map((f) => read(dir, f)).join('\n'));
-      i.hasPublic = has(dir, 'public');
-    }
-    return i;
-  },
+  ignore: (b) => ignoreFor(b),
   starter: (opts) => starter(opts, { build: opts.build !== false, start: true }),
+  dev(i, port, c) {
+    const cmd = i.scripts.dev ? [i.pm, 'run', 'dev'] : i.scripts.start ? [i.pm, 'start'] : ['node', i.pkg.main ?? 'index.js'];
+    return nodeDev(i, port, c, cmd);
+  },
   assumes: (i) => `a "start" script that runs the server${i.scripts.build ? ', a "build" script (TypeScript/Next.js/...)' : ''}`,
-  dockerfile(i, port, c) {
-    if (i.standalone) return nextStandalone(i, port, c);
+  dockerfile(i, port, c, b = DEFAULT_BUILD) {
+    const v = b.variant ?? 'alpine';
     const main = i.pkg.main ?? 'index.js';
-    // `next start` binds to the host given by the project's own script, which is often localhost: unreachable in a container.
-    const cmd = i.next ? ['npx', 'next', 'start', '-H', '0.0.0.0'] : i.scripts.start ? [i.pm, 'start'] : ['node', main];
+    const cmd = i.scripts.start ? [i.pm, 'start'] : ['node', main];
+    const env = `ENV NODE_ENV=production PORT=${port}`;
+    if (b.mode === 'production') {
+      // One runtime-only stage: production dependencies and the already built output.
+      return lines(
+        SYNTAX,
+        `FROM node:${i.version}-${v}`,
+        'WORKDIR /app',
+        corepack(i),
+        env,
+        envLines(c),
+        pkgs(c, v),
+        manifest(i),
+        `RUN ${install(i, true)}`,
+        'COPY --chown=node:node . .',
+        'USER node',
+        `EXPOSE ${port}`,
+        healthcheck(c, port, probeOf(v)),
+        `CMD ${JSON.stringify(cmd)}`,
+      );
+    }
+    if (b.mode === 'mixed') {
+      // One stage with everything: all dependencies, the build, then the server.
+      return lines(
+        SYNTAX,
+        `FROM node:${i.version}-${v}`,
+        'WORKDIR /app',
+        corepack(i),
+        pkgs(c, v),
+        manifest(i),
+        `RUN ${install(i)}`,
+        'COPY --chown=node:node . .',
+        argLines(c),
+        buildStep(i),
+        env,
+        envLines(c),
+        'USER node',
+        `EXPOSE ${port}`,
+        healthcheck(c, port, probeOf(v)),
+        `CMD ${JSON.stringify(cmd)}`,
+      );
+    }
     return lines(
       SYNTAX,
-      `FROM node:${i.version}-alpine AS base`,
+      `FROM node:${i.version}-${v} AS base`,
       'WORKDIR /app',
       corepack(i),
       '',
@@ -293,24 +327,23 @@ export const node = {
       'RUN rm -rf node_modules',
       '',
       'FROM base AS runtime',
-      `ENV NODE_ENV=production PORT=${port}${i.next ? ' NEXT_TELEMETRY_DISABLED=1' : ''}`,
+      env,
       envLines(c),
-      apk(c),
+      pkgs(c, v),
       'COPY --from=build --chown=node:node /app ./',
       'COPY --from=deps --chown=node:node /app/node_modules ./node_modules',
       'USER node',
       `EXPOSE ${port}`,
-      healthcheck(c, port, 'wget'),
+      healthcheck(c, port, probeOf(v)),
       `CMD ${JSON.stringify(cmd)}`,
     );
   },
+  buildNotes: (i, b) => [
+    b.mode === 'production' && prebuilt(i, 'the build output'),
+    b.mode === 'mixed' && 'Build and production in one image: it keeps your devDependencies and the sources next to the running server, so it is bigger than a multi-stage image.',
+  ],
   ci: (i, v, selected) => ci(i, selected, v),
   notes: (i, port) => [
-    i.standalone
-      ? 'Next.js with output: "standalone" detected: the image runs the traced server (node server.js) listening on 0.0.0.0.'
-      : i.next
-        ? 'Next.js detected: the image runs `next start -H 0.0.0.0`. Add output: "standalone" to next.config for a much smaller image (Dockcrate then switches to it).'
-        : `The app must listen on process.env.PORT (set to ${port}) and on 0.0.0.0, not just localhost.`,
-    !i.scripts.start && !i.pkg.main && 'No "start" script or "main" in package.json; CMD falls back to node index.js.',
+    `The app must listen on process.env.PORT (set to ${port}) and on 0.0.0.0, not just localhost.`,
   ],
 };

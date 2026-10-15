@@ -6,11 +6,8 @@ import { dirname, join } from 'node:path';
 import { HttpError, apiRoute, getMeta, guard, handleBrowse, handleGenerate } from '../src/api.js';
 
 const scratch = (prefix) => mkdtempSync(join(tmpdir(), prefix));
-const node = () => {
-  const dir = scratch('dockcrate-api-');
-  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { start: 'node .' } }));
-  return dir;
-};
+/** A project folder to add the files to. */
+const node = () => scratch('dockcrate-api-');
 const code = (fn) => {
   try {
     fn();
@@ -43,7 +40,7 @@ test('meta describes stacks, targets and the option vocabularies', () => {
 
 test('preview generates without writing; blank form fields are ignored', () => {
   const dir = node();
-  const data = handleGenerate({ dir, stack: '', ci: 'github', port: '', runtime: '', buildDir: '', db: [], healthcheck: '', packages: '', env: '' });
+  const data = handleGenerate({ dir, stack: 'node', ci: 'github', port: '', runtime: '', buildDir: '', db: [], healthcheck: '', packages: '', env: '' });
   assert.equal(data.stack, 'node');
   assert.ok(data.files.some((f) => f.path === 'Dockerfile'));
   assert.equal(existsSync(join(dir, 'Dockerfile')), false);
@@ -53,61 +50,61 @@ test('preview generates without writing; blank form fields are ignored', () => {
 test('files carry their current on-disk content (null when absent)', () => {
   const dir = node();
   writeFileSync(join(dir, 'Dockerfile'), 'FROM scratch\n');
-  const { files } = handleGenerate({ dir });
+  const { files } = handleGenerate({ dir, stack: 'node' });
   assert.equal(files.find((f) => f.path === 'Dockerfile').existing, 'FROM scratch\n');
   assert.equal(files.find((f) => f.path === 'docker-compose.yml').existing, null);
 });
 
 test('write creates files, then skips them unless forced', () => {
   const dir = node();
-  assert.ok(handleGenerate({ dir, write: true }).written.every((w) => w.status === 'written'));
+  assert.ok(handleGenerate({ dir, stack: 'node', write: true }).written.every((w) => w.status === 'written'));
   assert.ok(existsSync(join(dir, 'Dockerfile')));
-  assert.ok(handleGenerate({ dir, write: true }).written.every((w) => w.status === 'skipped'));
-  assert.ok(handleGenerate({ dir, write: true, force: true }).written.every((w) => w.status === 'written'));
+  assert.ok(handleGenerate({ dir, stack: 'node', write: true }).written.every((w) => w.status === 'skipped'));
+  assert.ok(handleGenerate({ dir, stack: 'node', write: true, force: true }).written.every((w) => w.status === 'written'));
 });
 
-test('browse lists subfolders with detected stacks, hiding dotfolders and node_modules', () => {
+test('browse lists subfolders, hiding dotfolders and node_modules', () => {
   const root = scratch('dockcrate-browse-');
   for (const d of ['zeta', 'app', '.hidden', 'node_modules']) mkdirSync(join(root, d));
-  writeFileSync(join(root, 'app', 'package.json'), JSON.stringify({ dependencies: { vue: '3' } }));
   writeFileSync(join(root, 'file.txt'), '');
   const data = handleBrowse({ dir: root });
   assert.equal(data.dir, root);
   assert.equal(data.parent, dirname(root));
-  assert.equal(data.stack, null);
-  assert.deepEqual(data.entries, [{ name: 'app', stack: 'vue' }, { name: 'zeta', stack: null }]);
+  assert.deepEqual(data.entries, [{ name: 'app' }, { name: 'zeta' }]);
   assert.equal(code(() => handleBrowse({ dir: join(root, 'file.txt') })), 400);
   assert.ok(handleBrowse({}).dir);
 });
 
-test('new project: preview needs no folder; write needs one and creates it', () => {
-  const data = handleGenerate({ mode: 'new', stack: 'fastapi', tool: 'uv', name: '', build: true, include: ['dockerfile', 'compose'] });
+test('preview needs no folder; write needs one and creates it', () => {
+  const data = handleGenerate({ stack: 'fastapi', tool: 'uv', name: '', build: true, include: ['dockerfile', 'compose'] });
   assert.deepEqual(data.files.map((f) => f.path), ['Dockerfile', 'docker-compose.yml']);
   assert.ok(data.files.every((f) => f.existing === null));
   assert.match(data.files[0].content, /uv sync/);
 
-  assert.equal(code(() => handleGenerate({ mode: 'new', stack: 'fastapi', write: true })), 400);
+  assert.equal(code(() => handleGenerate({ stack: 'fastapi', write: true })), 400);
   const target = join(scratch('dockcrate-new-'), 'brand', 'new');
-  assert.ok(handleGenerate({ mode: 'new', stack: 'node', dir: target, write: true }).written.every((w) => w.status === 'written'));
+  assert.ok(handleGenerate({ stack: 'node', dir: target, write: true }).written.every((w) => w.status === 'written'));
   assert.ok(existsSync(join(target, 'Dockerfile')));
 
   const dir = node();
-  assert.equal(code(() => handleGenerate({ mode: 'new', stack: 'node', dir: join(dir, 'package.json') })), 400);
-  assert.equal(code(() => handleGenerate({ mode: 'new', dir: target })), 400);
-  assert.equal(code(() => handleGenerate({ mode: 'new', stack: 'node', include: [] })), 400);
+  writeFileSync(join(dir, 'package.json'), '{}');
+  assert.equal(code(() => handleGenerate({ stack: 'node', dir: join(dir, 'package.json') })), 400);
+  assert.equal(code(() => handleGenerate({ dir: target })), 400);
+  assert.equal(code(() => handleGenerate({ stack: 'node', include: [] })), 400);
 });
 
 test('user errors are 400s with a message', () => {
   const dir = node();
-  assert.equal(code(() => handleGenerate({ dir: join(dir, 'nope') })), 400);
-  assert.equal(code(() => handleGenerate({ dir, db: ['postgres', 'mysql'] })), 400);
-  assert.equal(code(() => handleGenerate({ dir: '' })), 400);
-  assert.throws(() => handleGenerate({ dir, env: ['NOPE'] }), (e) => e instanceof HttpError && /use NAME=value/.test(e.message));
+  assert.equal(code(() => handleGenerate({ dir })), 400, 'a stack is needed');
+  assert.equal(code(() => handleGenerate({ dir, stack: 'node', db: ['mysql', 'mariadb'] })), 400);
+  assert.equal(code(() => handleGenerate({ dir, stack: 'cobol' })), 400);
+  assert.throws(() => handleGenerate({ dir, stack: 'node', env: ['NOPE'] }), (e) => e instanceof HttpError && /use NAME=value/.test(e.message));
 });
+
 
 test('deploy and pipeline options reach the generator (strings are split, empty tags mean none)', () => {
   const data = handleGenerate({
-    mode: 'new', stack: 'node', ci: 'github', deploy: 'cloudrun', deployOn: 'manual', environment: 'staging',
+    stack: 'node', ci: 'github', deploy: 'cloudrun', deployOn: 'manual', environment: 'staging',
     branches: 'main, release/*', tags: '', pullRequests: false, manual: false, schedule: '',
     concurrency: 'queue', permissions: ['id-token-write'], testVersions: '20, 22', testOs: [], platforms: [],
     include: ['ci', 'deploy'],
@@ -119,12 +116,12 @@ test('deploy and pipeline options reach the generator (strings are split, empty 
   assert.match(ci, /environment: staging/);
   assert.match(ci, /workload_identity_provider/);
   assert.ok(data.notes.some((n) => /GCP_WORKLOAD_IDENTITY_PROVIDER/.test(n)));
-  assert.equal(code(() => handleGenerate({ mode: 'new', stack: 'node', deploy: 'ssh', schedule: 'nonsense' })), 400);
+  assert.equal(code(() => handleGenerate({ stack: 'node', deploy: 'ssh', schedule: 'nonsense' })), 400);
 });
 
 test('CI steps, services, scan and container options reach the generator', () => {
   const data = handleGenerate({
-    mode: 'new', stack: 'node', include: ['dockerfile', 'ci'],
+    stack: 'node', include: ['dockerfile', 'ci'],
     ciSteps: ['lint', 'test'], ciServices: ['postgres'], scan: true,
     healthcheck: '/health', packages: 'curl, tini', env: 'LOG_LEVEL=info\nTZ=UTC', buildArgs: 'API_URL=http://x',
   });
@@ -139,13 +136,13 @@ test('CI steps, services, scan and container options reach the generator', () =>
   assert.match(df, /ENV LOG_LEVEL="info"\nENV TZ="UTC"/);
   assert.match(df, /ARG API_URL=http:\/\/x/);
   assert.deepEqual(data.ci.selected, ['lint', 'test']);
-  const none = handleGenerate({ mode: 'new', stack: 'node', ciSteps: [] });
+  const none = handleGenerate({ stack: 'node', ciSteps: [] });
   assert.deepEqual(none.ci.selected, []);
 });
 
 test('supply-chain options, registry and extra files reach the generator', () => {
   const data = handleGenerate({
-    mode: 'new', stack: 'go', registry: 'dockerhub', lintDockerfile: true, sbom: true, sign: true, codeScan: true,
+    stack: 'go', registry: 'dockerhub', lintDockerfile: true, sbom: true, sign: true, codeScan: true,
     extras: ['dependabot', 'makefile'],
   });
   const paths = data.files.map((f) => f.path);
@@ -157,7 +154,7 @@ test('supply-chain options, registry and extra files reach the generator', () =>
   assert.match(ci, /hadolint/);
   assert.match(ci, /cosign sign/);
   assert.match(ci, /provenance/);
-  assert.equal(code(() => handleGenerate({ mode: 'new', stack: 'go', extras: ['nope'] })), 400);
+  assert.equal(code(() => handleGenerate({ stack: 'go', extras: ['nope'] })), 400);
 });
 
 test('guard: only localhost hosts and same-origin requests', () => {
@@ -201,8 +198,8 @@ test('apiRoute refuses foreign origins before running the handler', async () => 
 
 test('written files are exactly the previewed ones', () => {
   const dir = node();
-  const preview = handleGenerate({ dir, ciSteps: ['build'] });
-  handleGenerate({ dir, ciSteps: ['build'], write: true });
+  const preview = handleGenerate({ dir, stack: 'node', ciSteps: ['build'] });
+  handleGenerate({ dir, stack: 'node', ciSteps: ['build'], write: true });
   for (const f of preview.files) assert.equal(readFileSync(join(dir, f.path), 'utf8'), f.content);
 });
 
@@ -231,13 +228,12 @@ test('hosted: any Host is accepted, a foreign Origin is still refused', () =>
     assert.equal(code(() => guard(new Headers({ host: 'dockcrate.vercel.app', origin: 'https://evil.example' }))), 403);
   }));
 
-test('hosted: browsing, existing projects and writing are refused; new projects generate without a folder', () =>
+test('hosted: browsing and writing are refused; files generate without a folder', () =>
   hosted(() => {
     assert.equal(code(() => handleBrowse({ dir: '/' })), 404);
-    assert.equal(code(() => handleGenerate({ dir: node() })), 400);
-    assert.equal(code(() => handleGenerate({ mode: 'new', stack: 'node', dir: '/tmp', write: true })), 400);
+    assert.equal(code(() => handleGenerate({ stack: 'node', dir: '/tmp', write: true })), 400);
     const target = join(scratch('dockcrate-hosted-'), 'never');
-    const data = handleGenerate({ mode: 'new', stack: 'node', dir: target });
+    const data = handleGenerate({ stack: 'node', dir: target });
     assert.equal(data.dir, null);
     assert.ok(data.files.some((f) => f.path === 'Dockerfile' && f.existing === null));
     assert.equal(existsSync(target), false);
@@ -246,4 +242,61 @@ test('hosted: browsing, existing projects and writing are refused; new projects 
 test('local mode is unchanged when the hosted flag is off', () => {
   assert.equal(getMeta().hosted, false);
   assert.equal(code(() => guard(new Headers({ host: 'dockcrate.vercel.app' }))), 403);
+});
+
+const fullstack = () => ({ services: [{ name: 'api', dir: 'api', stack: 'django' }, { name: 'web', dir: 'web', stack: 'vue' }] });
+
+test('services and environments reach the generator; the result lists the services', () => {
+  const auto = handleGenerate(fullstack());
+  assert.equal(auto.multi, true);
+  assert.deepEqual(auto.services.map((s) => [s.name, s.stack, s.port]), [['api', 'django', 8000], ['web', 'vue', 8080]]);
+  const edited = handleGenerate({
+    envs: 'dev, prod',
+    services: [{ name: 'api', dir: 'api', stack: 'django', port: '9000', db: ['postgres'] }, { name: 'site', dir: 'web', stack: 'vue', port: '' }],
+  });
+  assert.deepEqual(edited.services.map((s) => [s.name, s.port, s.db]), [['api', 9000, ['postgres']], ['site', 8080, []]]);
+  assert.ok(edited.files.some((f) => f.path === 'docker-compose.dev.yml') && edited.files.some((f) => f.path === 'web/Dockerfile.dev'));
+});
+
+test('service errors are 400s with a message', () => {
+  assert.equal(code(() => handleGenerate({ services: [{ dir: 'api' }] })), 400, 'a service needs a stack');
+  assert.equal(code(() => handleGenerate({ services: ['api'] })), 400);
+  assert.equal(code(() => handleGenerate({ services: [{ dir: '../etc', stack: 'node' }] })), 400);
+  assert.equal(code(() => handleGenerate({ ...fullstack(), port: '9000' })), 400);
+  assert.equal(code(() => handleGenerate({ ...fullstack(), envs: 'Prod' })), 400);
+});
+
+test('hosted: a new project with several services and environments generates without touching a disk', () =>
+  hosted(() => {
+    const data = handleGenerate({
+        name: 'shop',
+      envs: ['dev', 'prod'],
+      services: [{ name: 'api', dir: 'api', stack: 'django' }, { name: 'web', dir: 'web', stack: 'react' }],
+    });
+    assert.equal(data.dir, null);
+    assert.ok(data.files.some((f) => f.path === 'api/Dockerfile.dev') && data.files.some((f) => f.path === 'docker-compose.prod.yml'));
+    assert.ok(data.files.every((f) => f.existing === null));
+    // Writing into a folder of the server is refused, whatever the service list says.
+    assert.equal(code(() => handleGenerate({ dir: '/tmp', write: true, services: [{ dir: 'x', stack: 'node' }] })), 400);
+  }));
+
+test('deployTo, changedOnly, sharedPaths and dbPerService reach the generator', () => {
+  const data = handleGenerate({
+    ...fullstack(),
+    deploy: 'ssh',
+    deployTo: [{ name: 'qa', on: 'branch', match: 'develop' }, { name: 'production', on: 'tag', match: '' }],
+    changedOnly: true,
+    sharedPaths: 'libs/**, package.json',
+    dbPerService: true,
+    db: ['postgres'],
+  });
+  const ci = data.files.find((f) => f.path === '.github/workflows/ci.yml').content;
+  assert.match(ci, /deploy-qa:/);
+  assert.match(ci, /deploy-production:/);
+  assert.match(ci, /changes:/);
+  assert.match(ci, /libs\/\.\*\$/);
+  assert.ok(data.files.some((f) => f.path === 'db/postgres/init.sql'));
+  assert.equal(code(() => handleGenerate({ ...fullstack(), deploy: 'ssh', deployTo: ['qa'] })), 400);
+  assert.equal(code(() => handleGenerate({ ...fullstack(), deploy: 'ssh', deployTo: [{ name: 'qa', on: 'nightly' }] })), 400);
+  assert.equal(code(() => handleGenerate({ ...fullstack(), changedOnly: true, sharedPaths: 'a b c' })), 400);
 });

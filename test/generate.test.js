@@ -17,153 +17,11 @@ function project(files) {
 
 const file = (result, path) => result.files.find((f) => f.path === path)?.content;
 
-test('express app: multi-stage node image, runs start script as non-root', () => {
-  const dir = project({
-    'package.json': { dependencies: { express: '4' }, scripts: { start: 'node server.js', test: 'jest' }, engines: { node: '>=20' } },
-    'package-lock.json': '{}',
-  });
-  const r = generate(dir);
-  assert.equal(r.stack, 'node');
-  const df = file(r, 'Dockerfile');
-  assert.match(df, /FROM node:20-alpine AS base/);
-  assert.match(df, /RUN npm ci --omit=dev/);
-  assert.match(df, /USER node/);
-  assert.match(df, /CMD \["npm","start"\]/);
-  assert.doesNotMatch(df, /npm run build/);
-  assert.match(file(r, '.github/workflows/ci.yml'), /cache: "npm"/);
-  assert.match(file(r, '.github/workflows/ci.yml'), /run: npm test/);
-});
-
-test('pnpm project enables corepack and uses a frozen lockfile', () => {
-  const dir = project({ 'package.json': { dependencies: { fastify: '5' }, scripts: { build: 'tsc', start: 'node dist/index.js' } }, 'pnpm-lock.yaml': '' });
-  const r = generate(dir);
-  assert.match(file(r, 'Dockerfile'), /RUN corepack enable/);
-  assert.match(file(r, 'Dockerfile'), /pnpm install --frozen-lockfile --prod/);
-  assert.match(file(r, 'Dockerfile'), /RUN pnpm run build/);
-  assert.match(file(generate(dir, { ci: 'gitlab' }), '.gitlab-ci.yml'), /corepack enable/);
-});
-
-test('react + vite serves dist through nginx with SPA fallback; --db is ignored', () => {
-  const dir = project({ 'package.json': { dependencies: { react: '19' }, devDependencies: { vite: '7' }, scripts: { build: 'vite build' } }, 'package-lock.json': '{}' });
-  const r = generate(dir, { db: ['postgres'] });
-  assert.equal(r.stack, 'react');
-  assert.match(file(r, 'Dockerfile'), /COPY --from=build \/app\/dist\/ \/usr\/share\/nginx\/html\//);
-  assert.match(file(r, 'nginx.conf'), /try_files \$uri \$uri\/ \/index.html/);
-  assert.doesNotMatch(file(r, 'docker-compose.yml'), /postgres/);
-  assert.ok(r.notes.some((n) => n.includes('Ignoring --db')));
-});
-
-test('create-react-app builds into build/', () => {
-  const dir = project({ 'package.json': { dependencies: { react: '18', 'react-scripts': '5' }, scripts: { build: 'react-scripts build' } } });
-  assert.match(file(generate(dir), 'Dockerfile'), /\/app\/build\//);
-});
-
-test('next.js is treated as a node server, not a static react site', () => {
-  const dir = project({ 'package.json': { dependencies: { react: '19', next: '15' }, scripts: { build: 'next build', start: 'next start' } } });
-  assert.equal(generate(dir).stack, 'node');
-});
-
-test('vue', () => {
-  const dir = project({ 'package.json': { dependencies: { vue: '3' }, scripts: { build: 'vite build' } } });
-  assert.equal(generate(dir).stack, 'vue');
-});
-
-test('angular 17+ application builder outputs to dist/<name>/browser', () => {
-  const dir = project({
-    'package.json': { dependencies: { '@angular/core': '19' }, scripts: { build: 'ng build', test: 'ng test' } },
-    'angular.json': { projects: { shop: { architect: { build: { builder: '@angular-devkit/build-angular:application' } } } } },
-  });
-  const r = generate(dir);
-  assert.equal(r.stack, 'angular');
-  assert.match(file(r, 'Dockerfile'), /\/app\/dist\/shop\/browser\//);
-  assert.doesNotMatch(file(r, '.github/workflows/ci.yml'), /npm test/);
-});
-
-test('angular legacy builder uses outputPath as-is; --build-dir overrides', () => {
-  const dir = project({
-    'package.json': { dependencies: { '@angular/core': '15' }, scripts: { build: 'ng build' } },
-    'angular.json': { projects: { app: { architect: { build: { builder: '@angular-devkit/build-angular:browser', options: { outputPath: 'dist/custom' } } } } } },
-  });
-  assert.match(file(generate(dir), 'Dockerfile'), /\/app\/dist\/custom\//);
-  assert.match(file(generate(dir, { buildDir: './out/' }), 'Dockerfile'), /\/app\/out\//);
-});
-
-test('fastapi: finds the app object, pip install, uvicorn on the chosen port', () => {
-  const dir = project({
-    'requirements.txt': 'fastapi\nuvicorn[standard]\npytest\n',
-    'app/main.py': 'from fastapi import FastAPI\napi = FastAPI()\n',
-    '.python-version': '3.12.4\n',
-  });
-  const r = generate(dir, { port: 9000 });
-  assert.equal(r.stack, 'fastapi');
-  const df = file(r, 'Dockerfile');
-  assert.match(df, /FROM python:3\.12-slim/);
-  assert.match(df, /CMD \["uvicorn","app\.main:api","--host","0\.0\.0\.0","--port","9000"\]/);
-  assert.match(file(r, '.github/workflows/ci.yml'), /python-version: "3\.12"/);
-  assert.match(file(r, '.github/workflows/ci.yml'), /run: pytest/);
-});
-
-test('fastapi with uv', () => {
-  const dir = project({ 'pyproject.toml': 'dependencies = ["fastapi[standard]"]', 'uv.lock': '', 'main.py': 'app = FastAPI()' });
-  const r = generate(dir);
-  assert.match(file(r, 'Dockerfile'), /uv sync --frozen --no-dev --no-install-project/);
-  assert.match(file(r, 'Dockerfile'), /"main:app"/);
-});
-
-test('python project without a dependency manifest fails with a clear message', () => {
-  const dir = project({ 'pyproject.toml': 'dependencies = ["fastapi"]' });
-  assert.throws(() => generate(dir), /no requirements\.txt, uv\.lock or poetry\.lock/);
-});
-
-test('django beats a tooling package.json and finds the wsgi module', () => {
-  const dir = project({
-    'manage.py': '',
-    'requirements.txt': 'Django==5.1\ngunicorn\n',
-    'mysite/wsgi.py': '',
-    'package.json': { devDependencies: { tailwindcss: '4' } },
-  });
-  const r = generate(dir);
-  assert.equal(r.stack, 'django');
-  assert.match(file(r, 'Dockerfile'), /"gunicorn","mysite\.wsgi:application","--bind","0\.0\.0\.0:8000"/);
-  assert.match(file(r, '.github/workflows/ci.yml'), /python manage\.py test/);
-});
-
-test('dotnet web project: picks csproj, framework version and assembly name', () => {
-  const dir = project({
-    'src/Api/Api.csproj': '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>',
-    'tests/Api.Tests/Api.Tests.csproj': '<Project Sdk="Microsoft.NET.Sdk"></Project>',
-  });
-  const r = generate(dir);
-  const df = file(r, 'Dockerfile');
-  assert.equal(r.stack, 'dotnet');
-  assert.match(df, /sdk:8\.0 AS build/);
-  assert.match(df, /dotnet publish "src\/Api\/Api\.csproj"/);
-  assert.match(df, /ENTRYPOINT \["dotnet", "Api\.dll"\]/);
-  assert.match(file(r, '.github/workflows/ci.yml'), /dotnet-version: "8\.0\.x"/);
-});
-
-test('spring boot maven', () => {
-  const dir = project({ 'pom.xml': '<project><properties><java.version>17</java.version></properties><artifactId>spring-boot-starter</artifactId></project>' });
-  const r = generate(dir);
-  const df = file(r, 'Dockerfile');
-  assert.equal(r.stack, 'java');
-  assert.match(df, /FROM maven:3-eclipse-temurin-17 AS build/);
-  assert.match(df, /FROM eclipse-temurin:17-jre/);
-  assert.match(df, /find target .*-exec cp \{\} \/app\.jar \\;/);
-  assert.match(file(r, '.github/workflows/ci.yml'), /mvn -B verify/);
-});
-
-test('spring boot gradle requires the wrapper', () => {
-  const build = 'plugins { id "org.springframework.boot" version "3.3.0" }\njava { toolchain { languageVersion = JavaLanguageVersion.of(21) } }';
-  assert.throws(() => generate(project({ 'build.gradle': build })), /gradlew/);
-  const r = generate(project({ 'build.gradle': build, gradlew: '' }));
-  assert.match(file(r, 'Dockerfile'), /sh \.\/gradlew --no-daemon bootJar/);
-  assert.match(file(r, '.github/workflows/ci.yml'), /cache: "gradle"/);
-});
+// Nothing is read from a project: every test names its stack.
+const fresh = (opts) => generate(null, opts);
 
 test('compose wires databases with healthchecks, volumes and connection URLs', () => {
-  const dir = project({ 'package.json': { scripts: { start: 'node .' } } });
-  const r = generate(dir, { db: ['postgres', 'redis'], port: 4000 });
+  const r = fresh({ stack: 'node', db: ['postgres', 'redis'], port: 4000 });
   const compose = file(r, 'docker-compose.yml');
   assert.match(compose, /- "4000:4000"/);
   assert.match(compose, /DATABASE_URL: "postgres:\/\/app:\$\{DB_PASSWORD:-app\}@postgres:5432\/app"/);
@@ -173,32 +31,28 @@ test('compose wires databases with healthchecks, volumes and connection URLs', (
   assert.match(file(r, '.env.example'), /DB_PASSWORD=/);
 });
 
-test('compose output reuses the project\'s existing compose file name', () => {
-  const dir = project({ 'package.json': { scripts: { start: 'x' } }, 'compose.yaml': 'services: {}' });
-  const names = generate(dir).files.map((f) => f.path);
+test('compose output reuses the target folder\'s existing compose file name', () => {
+  const dir = project({ 'compose.yaml': 'services: {}' });
+  const names = generate(dir, { stack: 'node' }).files.map((f) => f.path);
   assert.ok(names.includes('compose.yaml'));
   assert.ok(!names.includes('docker-compose.yml'));
 });
 
 test('gitlab and no-ci variants', () => {
-  const dir = project({ 'package.json': { scripts: { start: 'node .' } } });
-  assert.match(file(generate(dir, { ci: 'gitlab' }), '.gitlab-ci.yml'), /image: node:24/);
-  assert.equal(generate(dir, { ci: 'none' }).files.some((f) => /ci|workflows/.test(f.path)), false);
+  assert.match(file(fresh({ stack: 'node', ci: 'gitlab' }), '.gitlab-ci.yml'), /image: node:24/);
+  assert.equal(fresh({ stack: 'node', ci: 'none' }).files.some((f) => /ci|workflows/.test(f.path)), false);
 });
 
-test('invalid options and undetectable projects are rejected', () => {
-  const dir = project({ 'README.md': '' });
-  assert.throws(() => generate(dir), /could not detect/);
-  assert.throws(() => generate(dir, { stack: 'react' }), /no react project/);
-  assert.throws(() => generate(dir, { stack: 'rails' }), /unknown stack/);
-  assert.throws(() => generate(dir, { db: ['oracle'] }), /unknown database/);
-  assert.throws(() => generate(dir, { db: ['postgres', 'mysql'] }), /pick one/);
-  assert.throws(() => generate(dir, { port: 99999 }), /invalid --port/);
+test('invalid options are rejected', () => {
+  assert.throws(() => generate(null, {}), /choose a stack/);
+  assert.throws(() => fresh({ stack: 'rails' }), /unknown stack/);
+  assert.throws(() => fresh({ stack: 'node', db: ['oracle'] }), /unknown database/);
+  assert.throws(() => fresh({ stack: 'node', port: 99999 }), /invalid --port/);
 });
 
 test('writeFiles keeps existing files unless forced', () => {
-  const dir = project({ 'package.json': { scripts: { start: 'x' } }, Dockerfile: 'mine' });
-  const { files } = generate(dir);
+  const dir = project({ Dockerfile: 'mine' });
+  const { files } = generate(dir, { stack: 'node' });
   const first = writeFiles(dir, files);
   assert.equal(first.find((f) => f.path === 'Dockerfile').status, 'skipped');
   assert.equal(readFileSync(join(dir, 'Dockerfile'), 'utf8'), 'mine');
@@ -207,16 +61,12 @@ test('writeFiles keeps existing files unless forced', () => {
   assert.notEqual(readFileSync(join(dir, 'Dockerfile'), 'utf8'), 'mine');
 });
 
-// ---- new projects (no folder to read: the user picks stack and tools)
-
-const fresh = (opts) => generate(null, { isNew: true, ...opts });
-
 test('every stack can generate a new project with defaults', () => {
   for (const stack of ['node', 'react', 'vue', 'angular', 'fastapi', 'django', 'dotnet', 'java', 'go', 'rust', 'php', 'ruby']) {
     const r = fresh({ stack });
     assert.equal(r.stack, stack);
     assert.deepEqual(r.files.map((f) => f.kind).filter((k, i, a) => a.indexOf(k) === i), ['dockerfile', 'dockerignore', 'compose', 'ci']);
-    assert.ok(r.notes.some((n) => n.startsWith('New project:')), stack);
+    assert.ok(r.notes.some((n) => n.startsWith('These files assume')), stack);
   }
 });
 
@@ -247,10 +97,10 @@ test('new project CI only installs and builds (no test or lint scripts assumed)'
   assert.doesNotMatch(file(fresh({ stack: 'fastapi' }), '.github/workflows/ci.yml'), /pytest/);
 });
 
-test('new project does not read the folder, but reuses its compose file name', () => {
-  assert.equal(generate('/definitely/not/here', { isNew: true, stack: 'vue' }).stack, 'vue');
+test('nothing is read from the project folder, but its compose file name is reused', () => {
+  assert.equal(generate('/definitely/not/here', { stack: 'vue' }).stack, 'vue');
   const dir = project({ 'compose.yml': '' });
-  assert.ok(generate(dir, { isNew: true, stack: 'vue' }).files.some((f) => f.path === 'compose.yml'));
+  assert.ok(generate(dir, { stack: 'vue' }).files.some((f) => f.path === 'compose.yml'));
 });
 
 test('include selects file groups', () => {
@@ -258,12 +108,11 @@ test('include selects file groups', () => {
   assert.deepEqual(r.files.map((f) => f.path), ['Dockerfile', 'nginx.conf', '.github/workflows/ci.yml']);
   const compose = fresh({ stack: 'node', include: ['compose'], db: ['postgres'] });
   assert.deepEqual(compose.files.map((f) => f.path), ['docker-compose.yml', '.env.example']);
-  const dir = project({ 'package.json': { scripts: { start: 'x' } } });
-  assert.deepEqual(generate(dir, { include: ['dockerignore'] }).files.map((f) => f.path), ['.dockerignore']);
+  assert.deepEqual(fresh({ stack: 'node', include: ['dockerignore'] }).files.map((f) => f.path), ['.dockerignore']);
 });
 
 test('new project and option validation', () => {
-  assert.throws(() => generate(null, { isNew: true }), /choose a stack/);
+  assert.throws(() => generate(null, {}), /choose a stack/);
   assert.throws(() => fresh({ stack: 'node', tool: 'bun' }), /supports --tool npm \| yarn \| pnpm/);
   assert.throws(() => fresh({ stack: 'dotnet', tool: 'npm' }), /no --tool option/);
   assert.throws(() => fresh({ stack: 'dotnet', name: 'x"; rm -rf /' }), /invalid name/);
@@ -312,7 +161,7 @@ test('test matrix: runtime versions and operating systems', () => {
   assert.match(text, /os: \["ubuntu-latest","windows-latest"\]\n {8}version: \["20","22"\]/);
   assert.match(text, /node-version: "\$\{\{ matrix.version \}\}"/);
   assert.match(text, /shell: bash/);
-  const gl = generate(null, { isNew: true, stack: 'node', ci: 'gitlab', testVersions: ['20', '22'] }).files.find((f) => f.kind === 'ci').content;
+  const gl = generate(null, { stack: 'node', ci: 'gitlab', testVersions: ['20', '22'] }).files.find((f) => f.kind === 'ci').content;
   assert.match(gl, /image: node:\$VERSION/);
   assert.match(gl, /- VERSION: \["20","22"\]/);
 });
@@ -392,8 +241,8 @@ test('ssh deploy makes compose pull a prebuilt image; other targets leave compos
 test('app name is a DNS-safe slug of the project name or folder', () => {
   const k8s = file(fresh({ stack: 'node', name: 'My_Shop.API', deploy: 'kubernetes' }), 'k8s/deployment.yaml');
   assert.match(k8s, /name: my-shop-api/);
-  const dir = project({ 'package.json': { scripts: { start: 'x' } } });
-  assert.match(generate(dir, { deploy: 'fly' }).files.find((f) => f.path === 'fly.toml').content, /^app = "dockcrate-[a-zA-Z0-9]+"|^app = "dockcrate-/m);
+  const dir = project({});
+  assert.match(generate(dir, { stack: 'node', deploy: 'fly' }).files.find((f) => f.path === 'fly.toml').content, /^app = "dockcrate-[a-zA-Z0-9]+"|^app = "dockcrate-/m);
 });
 
 test('deploy options are validated', () => {
@@ -402,12 +251,12 @@ test('deploy options are validated', () => {
   assert.throws(() => ciOf({ deploy: 'ssh', environment: 'prod uction' }), /invalid environment/);
   assert.throws(() => ciOf({ permissions: ['admin'] }), /invalid permission/);
   assert.throws(() => ciOf({ testOs: ['solaris'] }), /invalid test OS/);
-  assert.throws(() => generate(null, { isNew: true, stack: 'node', ci: 'none', deploy: 'ssh' }), /needs a CI provider/);
+  assert.throws(() => generate(null, { stack: 'node', ci: 'none', deploy: 'ssh' }), /needs a CI provider/);
 });
 
 test('gitlab: workflow rules, resource group, manual deploy, ignored GitHub-only settings', () => {
   const r = generate(null, {
-    isNew: true, stack: 'node', ci: 'gitlab', deploy: 'kubernetes', deployOn: 'manual',
+    stack: 'node', ci: 'gitlab', deploy: 'kubernetes', deployOn: 'manual',
     branches: ['main', 'release/*'], tags: 'v*', permissions: ['contents-write'], testOs: ['windows-latest'], schedule: '0 3 * * 1',
   });
   const text = r.files.find((f) => f.kind === 'ci').content;
@@ -460,18 +309,8 @@ test('CI steps are chosen per stack; defaults keep what the project defines', ()
   assert.deepEqual(fresh({ stack: 'node' }).ci, { available: ['lint', 'test', 'build', 'audit'], selected: ['build'] });
   assert.deepEqual(fresh({ stack: 'fastapi' }).ci.available, ['lint', 'test', 'audit']);
   assert.deepEqual(fresh({ stack: 'java' }).ci.available, ['test', 'build']);
-  const dir = project({ 'package.json': { scripts: { lint: 'eslint .', test: 'vitest', build: 'tsc', start: 'x' } } });
-  assert.deepEqual(generate(dir).ci.selected, ['lint', 'test', 'build']);
   assert.throws(() => fresh({ stack: 'java', ciSteps: ['lint'] }), /lint CI step is not available for java/);
   assert.throws(() => fresh({ stack: 'node', ciSteps: ['deploy'] }), /invalid CI step/);
-});
-
-test('selecting a CI step the project lacks is called out', () => {
-  const dir = project({ 'package.json': { scripts: { start: 'x' } } });
-  const r = generate(dir, { ciSteps: ['lint', 'test'] });
-  assert.ok(r.notes.some((n) => /no "lint" script/.test(n)));
-  assert.ok(r.notes.some((n) => /no "test" script/.test(n)));
-  assert.ok(!fresh({ stack: 'node', ciSteps: ['lint'] }).notes.some((n) => /no "lint" script/.test(n)));
 });
 
 test('python CI steps: ruff, pytest (installed when missing), pip-audit, per package manager', () => {
@@ -509,7 +348,7 @@ test('CI service containers: GitHub services + localhost URLs, GitLab services +
   assert.match(ci, /--health-cmd \\"mongosh --quiet --eval 1\\"/);
   assert.match(ci, /DATABASE_URL: "postgres:\/\/app:app@localhost:5432\/app"/);
   assert.match(ci, /MONGO_URL: "mongodb:\/\/localhost:27017\/app"/);
-  const gl = generate(null, { isNew: true, stack: 'node', ci: 'gitlab', ciServices: ['postgres', 'redis'] }).files.find((f) => f.kind === 'ci').content;
+  const gl = generate(null, { stack: 'node', ci: 'gitlab', ciServices: ['postgres', 'redis'] }).files.find((f) => f.kind === 'ci').content;
   assert.match(gl, /services:\n {4}- name: postgres:17-alpine\n {6}alias: postgres/);
   assert.match(gl, /DATABASE_URL: "postgres:\/\/app:app@postgres:5432\/app"/);
   assert.match(gl, /REDIS_URL: "redis:\/\/redis:6379"/);
@@ -521,11 +360,11 @@ test('image scan: Trivy action on GitHub; on GitLab a docker run of Trivy betwee
   const gh = stepsOf({ stack: 'node', scan: true }).ci;
   assert.match(gh, /aquasecurity\/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0\.35\.0/);
   assert.match(gh, /image-ref: "\$\{\{ steps.ref.outputs.image \}\}"/);
-  const gl = generate(null, { isNew: true, stack: 'node', ci: 'gitlab', scan: true, deploy: 'kubernetes' }).files.find((f) => f.kind === 'ci').content;
+  const gl = generate(null, { stack: 'node', ci: 'gitlab', scan: true, deploy: 'kubernetes' }).files.find((f) => f.kind === 'ci').content;
   assert.match(gl, /stages: \[test, build, deploy\]/);
   assert.match(gl, /docker build [\s\S]*aquasec\/trivy:0\.69\.3 image --exit-code 1 --severity HIGH,CRITICAL[\s\S]*docker push --all-tags/);
   assert.match(gl, /needs: \[build-image\]/);
-  const cloud = generate(null, { isNew: true, stack: 'node', ci: 'gitlab', scan: true, deploy: 'cloudrun' }).files.find((f) => f.kind === 'ci').content;
+  const cloud = generate(null, { stack: 'node', ci: 'gitlab', scan: true, deploy: 'cloudrun' }).files.find((f) => f.kind === 'ci').content;
   assert.match(cloud, /aquasec\/trivy/);
   assert.ok(fresh({ stack: 'node', scan: true, deploy: 'fly' }).notes.some((n) => /nothing to scan/.test(n)));
 });
@@ -566,7 +405,7 @@ test('container options: build args flow to Dockerfile, compose and CI', () => {
   const ci = r.files.find((f) => f.kind === 'ci').content;
   assert.match(ci, /build-args: "VITE_API_URL=\$\{\{ vars.VITE_API_URL \}\}\\nVITE_FLAG=\$\{\{ vars.VITE_FLAG \}\}"|build-args: \|/);
   assert.ok(r.notes.some((n) => /read from GitHub repository variables/.test(n)));
-  const gl = generate(null, { isNew: true, stack: 'node', ci: 'gitlab', buildArgs: ['API=1'] }).files.find((f) => f.kind === 'ci').content;
+  const gl = generate(null, { stack: 'node', ci: 'gitlab', buildArgs: ['API=1'] }).files.find((f) => f.kind === 'ci').content;
   assert.match(gl, /docker build --build-arg API="\$API" -t/);
   assert.ok(stepsOf({ stack: 'fastapi', buildArgs: ['X=1'] }).r.notes.some((n) => /Build args apply to Node and static-site/.test(n)));
 });
@@ -578,44 +417,36 @@ test('rabbitmq is a compose service with an AMQP URL', () => {
 });
 
 test('GitLab test job always has a script, even with no CI steps selected', () => {
-  const text = generate(null, { isNew: true, stack: 'java', ci: 'gitlab', ciSteps: [] }).files.find((f) => f.kind === 'ci').content;
+  const text = generate(null, { stack: 'java', ci: 'gitlab', ciSteps: [] }).files.find((f) => f.kind === 'ci').content;
   assert.match(text, /script:\n {4}- echo "No test steps selected"/);
 });
 
 // ------------------------------------------------------------------------------------ Go and Rust
 
-test('go: detects go.mod, the cmd/ main package and the go version; static binary in alpine', () => {
-  const dir = project({ 'go.mod': 'module x\n\ngo 1.23.1\n', 'cmd/api/main.go': 'package main', 'cmd/tool/sub/main.go': 'package main' });
-  const r = generate(dir, { healthcheck: '/health', packages: ['curl'] });
-  assert.equal(r.stack, 'go');
+test('go: a static binary in alpine, the main package at the root', () => {
+  const r = fresh({ stack: 'go', healthcheck: '/health', packages: ['curl'] });
   const df = file(r, 'Dockerfile');
-  assert.match(df, /FROM golang:1\.23-alpine AS build/);
-  assert.match(df, /CGO_ENABLED=0 go build .* -o \/out\/app \.\/cmd\/api/);
+  assert.match(df, /FROM golang:1\.25-alpine AS build/);
+  assert.match(df, /CGO_ENABLED=0 go build .* -o \/out\/app \./);
   assert.match(df, /FROM alpine:3 AS runtime/);
   assert.match(df, /RUN apk add --no-cache curl/);
   assert.match(df, /USER app/);
   assert.match(df, /HEALTHCHECK .* wget -qO \/dev\/null http:\/\/127\.0\.0\.1:8080\/health/);
+  assert.match(file(fresh({ stack: 'go', runtime: '1.23' }), 'Dockerfile'), /FROM golang:1\.23-alpine AS build/);
   assert.match(file(r, '.github/workflows/ci.yml'), /actions\/setup-go@[0-9a-f]{40} # v5/);
   const audit = fresh({ stack: 'go', ciSteps: ['lint', 'audit'] }).files.find((f) => f.kind === 'ci').content;
   assert.match(audit, /run: go vet .\/\.\.\./);
   assert.match(audit, /govulncheck/);
 });
 
-test('rust: crate name, rust-version and Cargo.lock drive the Dockerfile', () => {
-  const dir = project({ 'Cargo.toml': '[package]\nname = "my-svc"\nversion = "0.1.0"\nrust-version = "1.82"\n[dependencies]\n', 'Cargo.lock': '', 'src/main.rs': 'fn main(){}' });
-  const r = generate(dir);
-  assert.equal(r.stack, 'rust');
+test('rust: the crate name and a locked build drive the Dockerfile', () => {
+  const r = fresh({ stack: 'rust', name: 'my-svc', runtime: '1.82' });
   const df = file(r, 'Dockerfile');
   assert.match(df, /FROM rust:1\.82-alpine AS build/);
   assert.match(df, /cargo build --release --locked/);
   assert.match(df, /cp target\/release\/my-svc \/out\/app/);
-  const noLock = generate(project({ 'Cargo.toml': '[package]\nname = "a"\n', 'src/lib.rs': '' }));
-  assert.ok(noLock.notes.some((n) => /No Cargo\.lock/.test(n)));
-  assert.ok(noLock.notes.some((n) => /library crate/.test(n)));
-  assert.throws(() => generate(project({ 'Cargo.toml': '[workspace]\nmembers = []\n' })), /no \[package\]/);
+  assert.match(file(fresh({ stack: 'rust' }), 'Dockerfile'), /FROM rust:1-alpine AS build/);
 });
-
-// ------------------------------------------------------------------------------ more compose services
 
 test('mariadb, memcached, elasticsearch and mailpit are compose services; stateless ones get no volume', () => {
   const r = fresh({ stack: 'node', db: ['mariadb', 'memcached', 'elasticsearch', 'mailpit'] });
@@ -627,9 +458,19 @@ test('mariadb, memcached, elasticsearch and mailpit are compose services; statel
   assert.match(compose, /volumes:\n {2}mariadb-data:\n {2}elasticsearch-data:\n?$/);
   assert.doesNotMatch(compose, /memcached-data|mailpit-data/);
   assert.ok(r.notes.some((n) => /web inbox is on port 8025/.test(n)));
-  assert.throws(() => fresh({ stack: 'node', db: ['postgres', 'mariadb'] }), /both define DATABASE_URL/);
+  assert.throws(() => fresh({ stack: 'node', db: ['mysql', 'mariadb'] }), /both listen on port 3306/);
   const ci = stepsOf({ stack: 'node', ciServices: ['memcached'] }).ci;
   assert.match(ci, /MEMCACHED_URL: "localhost:11211"/);
+});
+
+test('several SQL engines: the first keeps DATABASE_URL, the others get their own variable', () => {
+  const compose = file(fresh({ stack: 'node', db: ['postgres', 'mariadb'] }), 'docker-compose.yml');
+  assert.match(compose, /DATABASE_URL: "postgres:\/\/app:\$\{DB_PASSWORD:-app\}@postgres:5432\/app"/);
+  assert.match(compose, /MARIADB_URL: "mysql:\/\/app:\$\{DB_PASSWORD:-app\}@mariadb:3306\/app"/);
+  assert.equal(compose.match(/DATABASE_URL/g).length, 1);
+  const ci = stepsOf({ stack: 'node', ciServices: ['mysql', 'postgres'] }).ci;
+  assert.match(ci, /DATABASE_URL: "mysql:\/\/app:app@localhost:3306\/app"/);
+  assert.match(ci, /POSTGRES_URL: "postgres:\/\/app:app@localhost:5432\/app"/);
 });
 
 // ------------------------------------------------------------------- supply chain and security
@@ -712,60 +553,37 @@ test('extras: Renovate replaces Dependabot outside GitHub; the file group filter
 
 // ------------------------------------------------------------------------------------ PHP and Ruby
 
-test('php: composer.json drives version, extensions and web root; apache runs unprivileged', () => {
-  const dir = project({
-    'composer.json': { require: { php: '^8.3', 'ext-intl': '*', 'laravel/framework': '^11' }, 'require-dev': { 'phpunit/phpunit': '^11' } },
-    'composer.lock': '{}',
-    'public/index.php': '<?php',
-  });
-  const r = generate(dir, { healthcheck: '/up' });
+test('php: apache runs unprivileged on the chosen port, composer in a vendor stage', () => {
+  const r = fresh({ stack: 'php', runtime: '8.3', healthcheck: '/up' });
   assert.equal(r.stack, 'php');
   const df = file(r, 'Dockerfile');
   assert.match(df, /FROM php:8\.3-apache AS runtime/);
-  assert.match(df, /install-php-extensions opcache intl/);
+  assert.match(df, /install-php-extensions opcache/);
   assert.match(df, /composer install --no-dev .*--ignore-platform-reqs/);
   assert.match(df, /s!\/var\/www\/html!\/var\/www\/html\/public!g/);
   assert.match(df, /Listen 8080/);
   assert.match(df, /USER www-data/);
   assert.match(df, /CMD curl -fsS -o \/dev\/null http:\/\/127\.0\.0\.1:8080\/up \|\| exit 1/);
-  assert.ok(r.notes.some((n) => /Laravel: set APP_KEY/.test(n)));
   const ci = file(r, '.github/workflows/ci.yml');
   assert.match(ci, /shivammathur\/setup-php@[0-9a-f]{40} # v2/);
-  assert.match(ci, /run: php artisan test/);
+  assert.match(ci, /run: vendor\/bin\/phpunit/);
   assert.equal(r.ci.selected.join(), 'test');
-  const noRoot = generate(project({ 'composer.json': { require: {} } }));
-  assert.match(file(noRoot, 'Dockerfile'), /FROM php:8\.4-apache/);
-  assert.ok(noRoot.notes.some((n) => /No composer\.lock/.test(n)));
+  assert.match(file(fresh({ stack: 'php' }), 'Dockerfile'), /FROM php:8\.4-apache/);
   assert.ok(fresh({ stack: 'php', codeScan: true }).notes.some((n) => /CodeQL does not support php/.test(n)));
 });
 
-test('ruby: rails app builds with native gem libs, precompiles assets, runs rails server', () => {
-  const dir = project({
-    Gemfile: "source 'https://rubygems.org'\nruby '3.3.5'\ngem 'rails'\ngem 'pg'\ngem 'puma'\ngem 'propshaft'\ngem 'rspec-rails'\n",
-    'Gemfile.lock': '',
-    'config.ru': '',
-    'config/application.rb': 'module App; class Application < Rails::Application; end; end',
-  });
-  const r = generate(dir, { packages: ['tzdata'] });
-  assert.equal(r.stack, 'ruby');
+test('ruby: a Rails server with native gem libraries on request', () => {
+  const r = fresh({ stack: 'ruby', packages: ['tzdata'], runtime: '3.3' });
   const df = file(r, 'Dockerfile');
   assert.match(df, /FROM ruby:3\.3-slim AS build/);
-  assert.match(df, /libpq-dev/);
-  assert.match(df, /apt-get install -y --no-install-recommends libpq5 tzdata/);
-  assert.match(df, /SECRET_KEY_BASE_DUMMY=1 bundle exec rails assets:precompile/);
+  assert.match(df, /apt-get install -y --no-install-recommends tzdata/);
   assert.match(df, /CMD \["bundle","exec","rails","server","-b","0.0.0.0","-p","3000"\]/);
   assert.match(df, /USER app/);
-  assert.match(file(r, '.github/workflows/ci.yml'), /run: bundle exec rspec/);
-  const api = generate(project({ Gemfile: "gem 'rails'\ngem 'propshaft'\n", 'Gemfile.lock': '', 'config/application.rb': 'config.api_only = true' }));
-  assert.doesNotMatch(file(api, 'Dockerfile'), /assets:precompile/);
-  const rack = generate(project({ Gemfile: "gem 'sinatra'\ngem 'puma'\n", 'Gemfile.lock': '', 'config.ru': '' }));
-  assert.match(file(rack, 'Dockerfile'), /CMD \["bundle","exec","puma","-b","tcp:\/\/0\.0\.0\.0:3000"\]/);
-  const hc = generate(dir, { healthcheck: '/up' });
+  assert.match(file(r, '.github/workflows/ci.yml'), /run: bin\/rails test|run: bundle exec rspec/);
+  assert.match(file(fresh({ stack: 'ruby' }), 'Dockerfile'), /FROM ruby:3\.4-slim AS build/);
+  const hc = fresh({ stack: 'ruby', healthcheck: '/up' });
   assert.ok(hc.notes.some((n) => /no curl or wget/.test(n)));
-  assert.match(file(hc, 'Dockerfile'), /\/dev\/tcp\/127\.0\.0\.1\/3000/);
 });
-
-// ------------------------------------------------------------------------- choosing the image registry
 
 test('every registry can be chosen for the registry target, on both providers, with its secrets listed', () => {
   const expected = {
@@ -967,7 +785,7 @@ test('edits can disable a whole file and add a new one; paths are validated', ()
 // ---- supply chain: pinned actions, safe Trivy versions
 const everything = (extra = {}) =>
   generate(null, {
-    isNew: true, stack: 'node', ci: 'github', deploy: 'kubernetes', scan: true, lintDockerfile: true, sbom: true, sign: true,
+    stack: 'node', ci: 'github', deploy: 'kubernetes', scan: true, lintDockerfile: true, sbom: true, sign: true,
     codeScan: true, platforms: ['linux/amd64', 'linux/arm64'], ...extra,
   }).files.filter((f) => f.kind === 'ci');
 const usesOf = (files) => files.flatMap((f) => [...f.content.matchAll(/^\s*(?:- )?uses: (\S+)(.*)$/gm)].map((m) => ({ ref: m[1], comment: m[2].trim() })));
@@ -992,8 +810,8 @@ test('Trivy is never emitted at a version from the March 2026 compromise (trivy-
   const text = [
     ...everything().map((f) => f.content),
     ...everything({ pinActions: false }).map((f) => f.content),
-    generate(null, { isNew: true, stack: 'node', ci: 'gitlab', scan: true }).files.find((f) => f.kind === 'ci').content,
-    generate(null, { isNew: true, stack: 'node', extras: ['makefile'] }).files.find((f) => f.path === 'Makefile').content,
+    generate(null, { stack: 'node', ci: 'gitlab', scan: true }).files.find((f) => f.kind === 'ci').content,
+    generate(null, { stack: 'node', extras: ['makefile'] }).files.find((f) => f.path === 'Makefile').content,
   ].join('\n');
   assert.doesNotMatch(text, /trivy-action@0\.28/);
   assert.doesNotMatch(text, /aquasec\/trivy(:latest)?\s/);
@@ -1002,34 +820,7 @@ test('Trivy is never emitted at a version from the March 2026 compromise (trivy-
   assert.match(text, /aquasec\/trivy:0\.69\.3/);
 });
 
-// ---- Next.js and Kubernetes
-const nextProject = (config = '', public_ = true) =>
-  project({
-    'package.json': { dependencies: { react: '19', next: '16' }, scripts: { build: 'next build', start: 'next start -H 127.0.0.1' } },
-    'package-lock.json': '{}',
-    ...(config && { 'next.config.mjs': config }),
-    ...(public_ && { 'public/robots.txt': '' }),
-  });
-
-test('next.js without standalone runs next start on 0.0.0.0, whatever the start script says', () => {
-  const r = generate(nextProject('export default {};'));
-  const df = file(r, 'Dockerfile');
-  assert.match(df, /CMD \["npx","next","start","-H","0\.0\.0\.0"\]/);
-  assert.match(df, /NEXT_TELEMETRY_DISABLED=1/);
-  assert.ok(r.notes.some((n) => /output: "standalone"/.test(n)));
-});
-
-test('next.js with output standalone ships only the traced server, static files and public/', () => {
-  const r = generate(nextProject("export default { output: 'standalone' };"));
-  const df = file(r, 'Dockerfile');
-  assert.match(df, /COPY --from=build --chown=node:node \/app\/public \.\/public/);
-  assert.match(df, /COPY --from=build --chown=node:node \/app\/\.next\/standalone \.\//);
-  assert.match(df, /COPY --from=build --chown=node:node \/app\/\.next\/static \.\/\.next\/static/);
-  assert.match(df, /ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0\.0\.0\.0/);
-  assert.match(df, /CMD \["node","server\.js"\]/);
-  assert.doesNotMatch(df, /npm start|next start/);
-  assert.doesNotMatch(file(generate(nextProject("export default { output: 'standalone' };", false)), 'Dockerfile'), /app\/public/);
-});
+// ---- Kubernetes
 
 test('kubernetes manifests: hardened containers, optional env Secret, probes follow the health path', () => {
   const plain = file(fresh({ stack: 'node', name: 'Shop', deploy: 'kubernetes' }), 'k8s/deployment.yaml');

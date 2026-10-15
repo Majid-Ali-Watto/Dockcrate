@@ -20,7 +20,7 @@ function BlockText({ block, onText }) {
       className="block-text"
       value={text}
       spellCheck={false}
-      rows={Math.min(24, Math.max(2, text.split('\n').length))}
+      rows={Math.min(12, Math.max(2, text.split('\n').length))}
       aria-label={`Text of ${block.title}`}
       onChange={(e) => {
         setText(e.target.value);
@@ -76,7 +76,7 @@ export default function BlockEditor({ file, edit = {}, change }) {
               <strong>{b.title}</strong>
             </label>
             <code className="muted">{b.id}</code>
-            {b.edited && <span className="tag differs">edited</span>}
+            {b.edited && <span className="tag edited">edited</span>}
             {b.custom && <span className="tag new">yours</span>}
             {b.stale && <span className="tag differs" title="The generated text changed since you edited this block">outdated</span>}
             <span className="push" />

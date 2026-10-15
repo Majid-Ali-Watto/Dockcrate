@@ -4,6 +4,41 @@ import { lines } from './fsutil.js';
 const x = (expr) => '${{ ' + expr + ' }}';
 const NOT_PR = "github.event_name != 'pull_request'";
 
+/**
+ * What deploying needs to know about each app, on top of what the pipeline knows. With one app the names are the classic ones
+ * (IMAGE, APP_IMAGE, the project name); with several, everything is per service: IMAGE_API, API_IMAGE, <project>-api.
+ */
+export function deployApps(appName, apps) {
+  const multi = apps.length > 1;
+  return apps.map((app) => {
+    const key = app.id.toUpperCase().replace(/-/g, '_');
+    return {
+      ...app,
+      multi,
+      key,
+      name: multi ? `${appName}-${app.id}` : appName,
+      imageEnv: multi ? `IMAGE_${key}` : 'IMAGE',
+      composeImage: multi ? `${key}_IMAGE` : 'APP_IMAGE',
+      k8sDir: multi ? `k8s/${app.id}` : 'k8s',
+      ecsDir: multi ? `ecs/${app.id}` : 'ecs',
+      suffix: multi ? `-${app.id}` : '',
+    };
+  });
+}
+
+/**
+ * When only changed services are deployed, DEPLOY_SERVICES is `,all,` or `,api,web,` (empty: `,`). These lines stop when nothing
+ * changed and define `deploy_it <service>`; `gate` wraps one service's commands in it.
+ */
+const changedHead = (ctx) =>
+  ctx.changedOnly
+    ? [
+        'if [ "${DEPLOY_SERVICES:-,all,}" = "," ]; then echo "No service changed: nothing to deploy"; exit 0; fi',
+        'deploy_it() { case "${DEPLOY_SERVICES:-,all,}" in *,all,*|*,"$1",*) return 0;; *) return 1;; esac; }',
+      ]
+    : [];
+const gate = (ctx, app, lines) => (ctx.changedOnly ? [`if deploy_it ${app.id}; then`, ...lines.map((l) => `  ${l}`), 'fi'] : lines);
+
 const merge = (a, b) => ({ secrets: [...a.secrets, ...b.secrets], vars: [...a.vars, ...b.vars] });
 
 /**
@@ -160,7 +195,7 @@ export const REGISTRIES = {
   },
 };
 
-const k8sDeployment = ({ appName, port, healthcheck = '' }) => {
+const k8sDeployment = ({ appName, port, healthcheck = '', replicas = 2 }) => {
   // With a health path the probes hit it; otherwise they only check that the port accepts connections.
   const probe = (kind, delay, period) => [
     `          ${kind}Probe:`,
@@ -176,7 +211,7 @@ const k8sDeployment = ({ appName, port, healthcheck = '' }) => {
     '  labels:',
     `    app: ${appName}`,
     'spec:',
-    '  replicas: 2',
+    `  replicas: ${replicas}`,
     '  selector:',
     '    matchLabels:',
     `      app: ${appName}`,
@@ -292,19 +327,26 @@ export const TARGETS = {
       vars: ['SSH_HOST', 'SSH_USER', 'DEPLOY_PATH'],
     }),
     shell: { image: 'alpine:3', setup: ['apk add --no-cache openssh-client'] },
-    script: ({ composeFile }) => [
-      'set -eu',
-      'mkdir -p ~/.ssh && chmod 700 ~/.ssh',
-      'printf \'%s\\n\' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519',
-      'printf \'%s\\n\' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts',
-      'REMOTE="$SSH_USER@$SSH_HOST"',
-      '# These variables expand here, on the runner, on purpose:',
-      '# shellcheck disable=SC2029',
-      'ssh "$REMOTE" "mkdir -p $DEPLOY_PATH"',
-      `scp ${composeFile} "$REMOTE:$DEPLOY_PATH/${composeFile}"`,
-      '# shellcheck disable=SC2029',
-      'printf \'%s\' "$REGISTRY_TOKEN" | ssh "$REMOTE" "docker login $REGISTRY -u $REGISTRY_USER --password-stdin && cd $DEPLOY_PATH && APP_IMAGE=$IMAGE docker compose pull && APP_IMAGE=$IMAGE docker compose up -d --remove-orphans"',
-    ],
+    script: (ctx) => {
+      const { composeFile, composeFiles = [composeFile], apps } = ctx;
+      const vars = apps.map((a) => `${a.composeImage}=$${a.imageEnv}`).join(' ');
+      const flags = composeFiles.length > 1 ? composeFiles.map((f) => ` -f ${f}`).join('') : '';
+      return [
+        'set -eu',
+        ...changedHead(ctx).slice(0, 1),
+        ...(ctx.changedOnly ? ['SERVICES=""', 'case "${DEPLOY_SERVICES:-,all,}" in *,all,*) ;; *) SERVICES=$(printf \'%s\' "$DEPLOY_SERVICES" | tr \',\' \' \') ;; esac'] : []),
+        'mkdir -p ~/.ssh && chmod 700 ~/.ssh',
+        'printf \'%s\\n\' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519',
+        'printf \'%s\\n\' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts',
+        'REMOTE="$SSH_USER@$SSH_HOST"',
+        '# These variables expand here, on the runner, on purpose:',
+        '# shellcheck disable=SC2029',
+        'ssh "$REMOTE" "mkdir -p $DEPLOY_PATH"',
+        ...composeFiles.map((f) => `scp ${f} "$REMOTE:$DEPLOY_PATH/${f}"`),
+        '# shellcheck disable=SC2029',
+        `printf '%s' "$REGISTRY_TOKEN" | ssh "$REMOTE" "docker login $REGISTRY -u $REGISTRY_USER --password-stdin && cd $DEPLOY_PATH && ${vars} docker compose${flags} pull${ctx.changedOnly ? ' $SERVICES' : ''} && ${vars} docker compose${flags} up -d --remove-orphans${ctx.changedOnly ? ' $SERVICES' : ''}"`,
+      ];
+    },
     notes: () => [
       'SSH: get SSH_KNOWN_HOSTS with `ssh-keyscan -H <host>`; the server needs Docker with the compose plugin, and a .env next to the compose file if the app needs one.',
     ],
@@ -315,18 +357,24 @@ export const TARGETS = {
     registry: 'builtin',
     needs: () => ({ secrets: ['KUBE_CONFIG'], vars: ['K8S_NAMESPACE?'] }),
     shell: { image: 'alpine:3', setup: ['apk add --no-cache kubectl'] },
-    script: ({ appName }) => [
+    script: (ctx) => [
       'set -eu',
+      ...changedHead(ctx),
       'mkdir -p ~/.kube && printf \'%s\' "$KUBE_CONFIG" | base64 -d > ~/.kube/config && chmod 600 ~/.kube/config',
       'NS="${K8S_NAMESPACE:-default}"',
-      'kubectl apply -n "$NS" -f k8s/service.yaml',
-      'sed "s|IMAGE_PLACEHOLDER|$IMAGE|" k8s/deployment.yaml | kubectl apply -n "$NS" -f -',
-      `kubectl rollout status -n "$NS" deployment/${appName} --timeout=180s`,
+      ...ctx.apps.flatMap((a) =>
+        gate(ctx, a, [
+          `kubectl apply -n "$NS" -f ${a.k8sDir}/service.yaml`,
+          `sed "s|IMAGE_PLACEHOLDER|$${a.imageEnv}|" ${a.k8sDir}/deployment.yaml | kubectl apply -n "$NS" -f -`,
+        ]),
+      ),
+      ...ctx.apps.flatMap((a) => gate(ctx, a, [`kubectl rollout status -n "$NS" deployment/${a.name} --timeout=180s`])),
     ],
-    files: (ctx) => [
-      { path: 'k8s/deployment.yaml', content: k8sDeployment(ctx) },
-      { path: 'k8s/service.yaml', content: k8sService(ctx) },
-    ],
+    files: ({ apps, replicas }) =>
+      apps.flatMap((a) => [
+        { path: `${a.k8sDir}/deployment.yaml`, content: k8sDeployment({ appName: a.name, port: a.port, healthcheck: a.healthcheck, replicas }) },
+        { path: `${a.k8sDir}/service.yaml`, content: k8sService({ appName: a.name, port: a.port }) },
+      ]),
     notes: () => [
       'Kubernetes: KUBE_CONFIG is your kubeconfig, base64-encoded (`base64 -w0 ~/.kube/config`). A private registry needs an imagePullSecret in the cluster; the Service is ClusterIP, so add an Ingress for public traffic. The pods read optional settings from a Secret named <app>-env (kubectl create secret generic <app>-env --from-literal=KEY=value).',
     ],
@@ -362,9 +410,13 @@ export const TARGETS = {
         'gcloud auth activate-service-account --key-file "$HOME/gcp-key.json"',
       ],
     },
-    script: ({ port }) => [
-      `gcloud run deploy "$CLOUD_RUN_SERVICE" --image "$IMAGE" --region "$GCP_REGION" --project "$GCP_PROJECT" --port ${port} --quiet`,
+    script: (ctx) => [
+      ...changedHead(ctx),
+      ...ctx.apps.flatMap((a) =>
+        gate(ctx, a, [`gcloud run deploy "$CLOUD_RUN_SERVICE${a.suffix}" --image "$${a.imageEnv}" --region "$GCP_REGION" --project "$GCP_PROJECT" --port ${a.port} --quiet`]),
+      ),
     ],
+    multiNote: 'Cloud Run: CLOUD_RUN_SERVICE is the name prefix; each service is deployed as <CLOUD_RUN_SERVICE>-<service>.',
     notes: () => [
       'Cloud Run: create the Artifact Registry repo (GAR_REPO) first. The service is private by default; add --allow-unauthenticated to the deploy command for a public site.',
     ],
@@ -390,14 +442,23 @@ export const TARGETS = {
       ],
     },
     shell: { image: { name: 'amazon/aws-cli:latest', entrypoint: [''] }, setup: [] },
-    script: () => [
+    script: (ctx) => [
       'set -eu',
-      'sed "s|IMAGE_PLACEHOLDER|$IMAGE|" ecs/task-definition.json > task-definition.rendered.json',
-      'TASK_DEF=$(aws ecs register-task-definition --region "$AWS_REGION" --cli-input-json file://task-definition.rendered.json --query taskDefinition.taskDefinitionArn --output text)',
-      'aws ecs update-service --region "$AWS_REGION" --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "$TASK_DEF" > /dev/null',
-      'aws ecs wait services-stable --region "$AWS_REGION" --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"',
+      ...changedHead(ctx),
+      ...ctx.apps.flatMap((a) => {
+        const rendered = `task-definition${a.multi ? `.${a.id}` : ''}.rendered.json`;
+        const service = `"$ECS_SERVICE${a.suffix}"`;
+        const def = a.multi ? `TASK_DEF_${a.key}` : 'TASK_DEF';
+        return gate(ctx, a, [
+          `sed "s|IMAGE_PLACEHOLDER|$${a.imageEnv}|" ${a.ecsDir}/task-definition.json > ${rendered}`,
+          `${def}=$(aws ecs register-task-definition --region "$AWS_REGION" --cli-input-json file://${rendered} --query taskDefinition.taskDefinitionArn --output text)`,
+          `aws ecs update-service --region "$AWS_REGION" --cluster "$ECS_CLUSTER" --service ${service} --task-definition "$${def}" > /dev/null`,
+        ]);
+      }),
+      ...ctx.apps.flatMap((a) => gate(ctx, a, [`aws ecs wait services-stable --region "$AWS_REGION" --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE${a.suffix}"`])),
     ],
-    files: (ctx) => [{ path: 'ecs/task-definition.json', content: ecsTaskDefinition(ctx) }],
+    multiNote: 'ECS: ECS_SERVICE is the name prefix; each service is deployed as <ECS_SERVICE>-<service>, with its own task definition under ecs/<service>/, and ECR repositories are <ECR_REPOSITORY>/<service>.',
+    files: ({ apps }) => apps.map((a) => ({ path: `${a.ecsDir}/task-definition.json`, content: ecsTaskDefinition({ appName: a.name, port: a.port }) })),
     notes: () => [
       'ECS: edit ecs/task-definition.json (executionRoleArn, awslogs-region, CPU/memory) and create the cluster, service and ECR repository first.',
     ],
@@ -426,11 +487,17 @@ export const TARGETS = {
       image: 'mcr.microsoft.com/azure-cli:latest',
       setup: ['az login --service-principal -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID" > /dev/null'],
     },
-    script: () => [
+    script: (ctx) => [
       'set -eu',
-      'az webapp config container set --name "$AZURE_WEBAPP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --container-image-name "$IMAGE" --container-registry-url "https://$ACR_NAME.azurecr.io" > /dev/null',
-      'az webapp restart --name "$AZURE_WEBAPP_NAME" --resource-group "$AZURE_RESOURCE_GROUP"',
+      ...changedHead(ctx),
+      ...ctx.apps.flatMap((a) =>
+        gate(ctx, a, [
+          `az webapp config container set --name "$AZURE_WEBAPP_NAME${a.suffix}" --resource-group "$AZURE_RESOURCE_GROUP" --container-image-name "$${a.imageEnv}" --container-registry-url "https://$ACR_NAME.azurecr.io" > /dev/null`,
+          `az webapp restart --name "$AZURE_WEBAPP_NAME${a.suffix}" --resource-group "$AZURE_RESOURCE_GROUP"`,
+        ]),
+      ),
     ],
+    multiNote: 'Azure: AZURE_WEBAPP_NAME is the name prefix; each service is its own Web App named <AZURE_WEBAPP_NAME>-<service>.',
     notes: () => [
       'Azure: the Web App needs pull access to the registry (give its managed identity the AcrPull role) and the service principal needs AcrPush.',
     ],
@@ -442,8 +509,12 @@ export const TARGETS = {
     needs: () => ({ secrets: ['FLY_API_TOKEN'], vars: [] }),
     github: { prepare: [{ uses: 'superfly/flyctl-actions/setup-flyctl@master' }] },
     shell: { image: { name: 'flyio/flyctl:latest', entrypoint: [''] }, setup: [] },
-    script: () => ['flyctl deploy --remote-only'],
-    files: (ctx) => [{ path: 'fly.toml', content: flyToml(ctx) }],
+    script: (ctx) => [
+      ...changedHead(ctx),
+      ...ctx.apps.flatMap((a) => gate(ctx, a, [a.dir === '.' ? 'flyctl deploy --remote-only' : `(cd ${a.dir} && flyctl deploy --remote-only)`])),
+    ],
+    files: ({ apps }) => apps.map((a) => ({ path: a.dir === '.' ? 'fly.toml' : `${a.dir}/fly.toml`, content: flyToml({ appName: a.name, port: a.port }) })),
+    multiNote: 'Fly.io: each service is its own app, <project>-<service>, with a fly.toml in its folder; create them with `fly apps create`.',
     notes: () => [
       'Fly.io: create the app first (`fly apps create <name>`); Fly builds the image from your Dockerfile itself, so no registry is used. Set primary_region in fly.toml if you want a fixed region.',
     ],

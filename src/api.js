@@ -6,11 +6,13 @@ import { dirname, join, resolve } from 'node:path';
 import {
   generate,
   writeFiles,
-  detectStack,
   stackInfo,
   dbIds,
   ciIds,
   KINDS,
+  RESTART_POLICIES,
+  VARIANTS,
+  STAGE_MODES,
   PERMISSIONS,
   TEST_OS,
   PLATFORMS,
@@ -31,7 +33,7 @@ const MAX_FOLDERS = 500;
 
 /**
  * Hosted mode (Vercel, or DOCKCRATE_HOSTED=1): the server is someone else's machine, so nothing may touch its disk.
- * Only "new project" generation is served; browsing, existing folders and writing are refused.
+ * Files are generated to copy or download; browsing folders and writing to one are refused.
  */
 export const isHosted = () => Boolean(process.env.VERCEL) || process.env.DOCKCRATE_HOSTED === '1';
 
@@ -97,16 +99,16 @@ const isDirectory = (path) => {
   }
 };
 
-const expand = (input) => resolve(input.trim().replace(/^~(?=$|\/)/, homedir()));
-
-function projectDir(input) {
-  if (typeof input !== 'string' || !input.trim()) throw new HttpError(400, 'enter a project folder');
+function existingFolder(input) {
+  if (typeof input !== 'string' || !input.trim()) throw new HttpError(400, 'enter a folder');
   const dir = expand(input);
   if (!isDirectory(dir)) throw new HttpError(400, `${dir} is not a directory`);
   return dir;
 }
 
-/** Folder to write a new project into: may not exist yet (it is created on write), may be blank (preview only). */
+const expand = (input) => resolve(input.trim().replace(/^~(?=$|\/)/, homedir()));
+
+/** The project folder the files are added to: may not exist yet (it is created on write), may be blank (preview only). */
 function targetDir(input) {
   if (input == null || (typeof input === 'string' && !input.trim())) return null;
   if (typeof input !== 'string') throw new HttpError(400, 'invalid folder');
@@ -135,6 +137,9 @@ export function getMeta() {
     dbs: dbIds(),
     ci: ciIds(),
     kinds: KINDS,
+    restartPolicies: RESTART_POLICIES,
+    variants: VARIANTS,
+    stageModes: STAGE_MODES,
     extras: EXTRAS,
     targets: targetInfo(),
     registries: registryInfo(),
@@ -146,10 +151,10 @@ export function getMeta() {
   };
 }
 
-/** Subfolders of `dir` (hidden ones and node_modules left out), each tagged with the stack detected inside. */
+/** Subfolders of `dir` (hidden ones and node_modules left out), so a project folder can be picked. */
 export function handleBrowse(body) {
   if (isHosted()) throw new HttpError(404, 'not available on the hosted site');
-  const dir = projectDir(body.dir || homedir());
+  const dir = existingFolder(body.dir || homedir());
   let names;
   try {
     names = readdirSync(dir, { withFileTypes: true }).map((e) => e.name);
@@ -160,39 +165,68 @@ export function handleBrowse(body) {
     .filter((name) => !name.startsWith('.') && name !== 'node_modules' && isDirectory(join(dir, name)))
     .sort((a, b) => a.localeCompare(b))
     .slice(0, MAX_FOLDERS)
-    .map((name) => ({ name, stack: detectStack(join(dir, name)) }));
+    .map((name) => ({ name }));
   const parent = dirname(dir);
-  return { dir, parent: parent === dir ? null : parent, stack: detectStack(dir), entries };
+  return { dir, parent: parent === dir ? null : parent, entries };
 }
 
 const STRING_OPTIONS = [
-  'stack', 'ci', 'runtime', 'buildDir', 'tool', 'deploy', 'deployOn', 'environment', 'concurrency', 'healthcheck', 'registry', 'runner', 'timeout', 'pipelineName',
+  'stack', 'ci', 'imageVariant', 'stageMode', 'restart', 'runtime', 'buildDir', 'tool', 'deploy', 'deployOn', 'environment', 'concurrency', 'healthcheck', 'registry', 'runner', 'timeout', 'pipelineName',
 ];
 const LIST_OPTIONS = [
-  'permissions', 'testVersions', 'testOs', 'platforms', 'ciServices', 'packages', 'extras', 'imageTags', 'scanSeverity',
-  'branchesIgnore', 'tags', 'tagsIgnore', 'prBranches', 'paths', 'pathsIgnore',
+  'permissions', 'appNetworks', 'dbNetworks', 'testVersions', 'testOs', 'platforms', 'ciServices', 'packages', 'extras', 'imageTags', 'scanSeverity',
+  'branchesIgnore', 'tags', 'tagsIgnore', 'prBranches', 'paths', 'pathsIgnore', 'sharedPaths',
 ];
 const FLAG_OPTIONS = [
-  'pullRequests', 'manual', 'release', 'scan', 'lintDockerfile', 'sbom', 'sign', 'codeScan', 'depCache', 'layerCache', 'pinActions', 'failFast', 'testJob',
+  'changedOnly', 'dbPerService', 'multistage', 'pullRequests', 'manual', 'release', 'scan', 'lintDockerfile', 'sbom', 'sign', 'codeScan', 'depCache', 'layerCache', 'pinActions', 'failFast', 'testJob',
 ];
+
+const SERVICE_STRINGS = ['name', 'dir', 'stack', 'runtime', 'tool', 'buildDir', 'project', 'healthcheck', 'imageVariant', 'stageMode'];
+const SERVICE_LISTS = ['packages', 'db', 'testVersions', 'networks'];
+
+/** One service of the request, reduced to the options the generator knows (it validates their values). */
+function cleanService(raw) {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new HttpError(400, 'a service must be an object');
+  const svc = {};
+  for (const key of SERVICE_STRINGS) if (!blank(raw[key])) svc[key] = String(raw[key]);
+  for (const key of SERVICE_LISTS) if (!blank(raw[key])) svc[key] = list(raw[key]);
+  if (raw.ciSteps != null) svc.ciSteps = list(raw.ciSteps); // an empty list is meaningful ("no steps")
+  if (typeof raw.multistage === 'boolean') svc.multistage = raw.multistage;
+  for (const key of ['env', 'buildArgs']) if (!blank(raw[key])) svc[key] = raw[key];
+  if (!blank(raw.port)) svc.port = Number(raw.port);
+  return svc;
+}
 
 /** Preview (or, with `write: true`, write) the files for the options in `body`. */
 export function handleGenerate(body) {
   const hosted = isHosted();
-  if (hosted && (body.mode !== 'new' || body.write === true)) {
-    throw new HttpError(400, 'the hosted site generates files for a new project to copy or download; run Dockcrate locally to read or write a folder');
+  if (hosted && body.write === true) {
+    throw new HttpError(400, 'the hosted site generates files to copy or download; run Dockcrate locally to write them into a folder');
   }
-  const isNew = body.mode === 'new';
-  const dir = hosted ? null : isNew ? targetDir(body.dir) : projectDir(body.dir);
-  const opts = { isNew };
+  const dir = hosted ? null : targetDir(body.dir);
+  const opts = {};
   for (const key of STRING_OPTIONS) {
     if (!blank(body[key])) opts[key] = String(body[key]);
   }
-  if (isNew && !blank(body.name)) opts.name = String(body.name);
+  if (!blank(body.name)) opts.name = String(body.name);
   // An empty branch list, tag list or CI step list is meaningful ("none"), unlike the other blank fields.
   if (body.branches != null) opts.branches = list(body.branches);
   if (body.schedule != null) opts.schedule = Array.isArray(body.schedule) ? body.schedule : String(body.schedule).split('\n').map((s) => s.trim()).filter(Boolean);
   if (body.edits != null) opts.edits = body.edits;
+  if (Array.isArray(body.services) && body.services.length) opts.services = body.services.map(cleanService);
+  if (body.envs != null) opts.envs = list(body.envs);
+  if (Array.isArray(body.networks) && body.networks.length) {
+    opts.networks = body.networks.map((n) => {
+      if (typeof n !== 'object' || n === null) throw new HttpError(400, 'a network must be an object');
+      return { name: String(n.name ?? ''), internal: n.internal === true, external: n.external === true };
+    });
+  }
+  if (Array.isArray(body.deployTo) && body.deployTo.length) {
+    opts.deployTo = body.deployTo.map((d) => {
+      if (typeof d !== 'object' || d === null) throw new HttpError(400, 'a deployment must be an object');
+      return { name: String(d.name ?? ''), on: String(d.on ?? ''), ...(!blank(d.match) && { match: String(d.match) }) };
+    });
+  }
   if (body.ciSteps != null) opts.ciSteps = list(body.ciSteps);
   for (const key of FLAG_OPTIONS) {
     if (typeof body[key] === 'boolean') opts[key] = body[key];
@@ -205,6 +239,7 @@ export function handleGenerate(body) {
   }
   if (!blank(body.db)) opts.db = [].concat(body.db).map(String);
   if (!blank(body.port)) opts.port = Number(body.port);
+  if (!blank(body.replicas)) opts.replicas = Number(body.replicas);
   if (typeof body.build === 'boolean') opts.build = body.build;
   if (Array.isArray(body.include)) opts.include = body.include.map(String);
 

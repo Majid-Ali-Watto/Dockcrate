@@ -1,53 +1,59 @@
 'use client';
 
 import { Check, CheckGroup, ChoiceField, Field, MultiField, Section, SelectField, TextArea, TextField, opts } from './Controls.jsx';
+import DeployEnvs from './DeployEnvs.jsx';
+import Networks from './Networks.jsx';
+import Services from './Services.jsx';
 import { LABELS, PRESETS, RUNNERS, RUNTIMES } from '../lib/form.js';
 
-export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
-  const { isNew, stack } = show;
-  const stackOptions = [...(isNew ? [] : [{ value: '', label: 'Auto-detect' }]), ...opts(meta.stacks.map((s) => s.id))];
-  const selectedSteps = form.ciSteps ?? result?.ci?.selected ?? [];
-  const runtimes = opts(RUNTIMES[stack?.id] ?? []);
+export default function Sidebar({ form, set, meta, show, result, loading, onBrowse }) {
+  const { stack } = show;
+  const stackOptions = opts(meta.stacks.map((s) => s.id));
+  const selectedSteps = form.ciSteps ?? (show.multi ? [...new Set(result?.services?.flatMap((svc) => svc.ci.selected) ?? [])] : result?.ci?.selected) ?? [];
+  const runtimes = opts(RUNTIMES[show.versionStack] ?? []);
   const runner = RUNNERS[form.ci];
   const port = stack?.port;
 
   return (
     <div className="sidebar-body">
       {!meta.hosted && (
-        <>
-          <fieldset>
-            <legend>Generate for</legend>
-            <label className="check">
-              <input type="radio" name="mode" checked={!isNew} onChange={() => set('mode', 'existing')} />
-              <span>Existing project</span>
-            </label>
-            <label className="check">
-              <input type="radio" name="mode" checked={isNew} onChange={() => set('mode', 'new')} />
-              <span>New project</span>
-            </label>
-          </fieldset>
-
-          <Field
-            label={isNew ? 'Write to folder (optional)' : 'Project folder'}
-            hint={
-              isNew
-                ? 'Only needed to write the files. A folder that does not exist yet is created. Leave empty to preview, copy or download.'
-                : 'Pick a folder, or paste a path (~ works).'
-            }
-          >
-            {(id) => (
-              <div className="pathrow">
-                <input id={id} type="text" value={form.dirs[form.mode]} spellCheck={false} autoComplete="off" onChange={(e) => set('dir', e.target.value)} />
-                <button type="button" onClick={onBrowse}>
-                  Browse…
-                </button>
-              </div>
-            )}
-          </Field>
-        </>
+        <Field
+          label="Add the files to a project (optional)"
+          hint="Pick the project folder, or paste a path (~ works). The files are written straight into it; ones that already exist are kept unless you tick Overwrite. A folder that does not exist yet is created. Leave empty to preview, copy or download."
+        >
+          {(id) => (
+            <div className="pathrow">
+              <input id={id} type="text" value={form.dir} spellCheck={false} autoComplete="off" onChange={(e) => set('dir', e.target.value)} />
+              <button type="button" onClick={onBrowse}>
+                Browse…
+              </button>
+            </div>
+          )}
+        </Field>
       )}
 
-      <SelectField label="Stack" value={form.stack} onChange={(v) => set('stack', v)} options={stackOptions} />
+      <CheckGroup
+        legend="Files to generate"
+        options={opts(meta.kinds.filter((k) => k !== 'deploy' || show.deployConfig), LABELS.kinds)}
+        value={form.include}
+        onChange={(v) => set('include', v)}
+      />
+
+      {show.extras && (
+        <CheckGroup
+          legend="Extra project files"
+          hint="(optional)"
+          options={opts(meta.extras, LABELS.extras)}
+          value={form.extras}
+          onChange={(v) => set('extras', v)}
+        />
+      )}
+
+      {!show.multi && <SelectField label="Stack" value={form.stack} onChange={(v) => set('stack', v)} options={stackOptions} />}
+      <Services form={form} set={set} meta={meta} show={show} result={result} loading={loading} />
+      {show.projectName && (
+        <TextField label="Project name" hint="Names the images and the deployed resources." value={form.name} placeholder="my-project" onChange={(v) => set('name', v)} />
+      )}
 
       {show.tool && (
         <SelectField
@@ -74,6 +80,7 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
         </div>
       )}
 
+      {!show.multi && (
       <div className="row">
         <ChoiceField
           label="Port"
@@ -87,12 +94,13 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
         <ChoiceField
           label="Runtime"
           value={form.runtime}
-          defaultLabel={isNew ? 'Default' : 'Default (detected)'}
+          defaultLabel="Default"
           options={runtimes}
           placeholder="e.g. 22"
           onChange={(v) => set('runtime', v)}
         />
       </div>
+      )}
       {show.buildDir && (
         <ChoiceField
           label="Build output folder"
@@ -105,8 +113,8 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
       )}
       {show.databases && (
         <MultiField
-          label="Services in compose"
-          hint="Databases and queues."
+          label={show.multi ? 'Services in compose (shared)' : 'Services in compose'}
+          hint={show.multi ? 'Databases and queues. Every backend gets them unless it has its own list.' : 'Databases and queues.'}
           options={opts(meta.dbs)}
           value={form.db}
           allowCustom={false}
@@ -114,24 +122,70 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
         />
       )}
 
-      <CheckGroup
-        legend="Files to generate"
-        options={opts(meta.kinds.filter((k) => k !== 'deploy' || show.deployConfig), LABELS.kinds)}
-        value={form.include}
-        onChange={(v) => set('include', v)}
-      />
+      {show.multi && show.databases && (
+        <div className="field">
+          <Check checked={form.dbPerService} onChange={(v) => set('dbPerService', v)}>
+            A database per service <span className="hint">(shared server; SQL, MongoDB and redis)</span>
+          </Check>
+        </div>
+      )}
 
-      {show.extras && (
-        <CheckGroup
-          legend="Extra project files"
-          hint="(optional)"
-          options={opts(meta.extras, LABELS.extras)}
-          value={form.extras}
-          onChange={(v) => set('extras', v)}
+      <Section title="Image">
+        {show.variants.length > 1 && (
+          <SelectField
+            label="Base image"
+            hint="alpine is the smallest; slim is Debian-based and avoids musl surprises. Default: what each stack normally uses."
+            value={form.imageVariant}
+            onChange={(v) => set('imageVariant', v)}
+            options={['', ...show.variants].map((v) => ({ value: v, label: LABELS.variants[v] }))}
+          />
+        )}
+        <div className="field">
+          <Check checked={form.multistage} onChange={(v) => set('multistage', v)}>
+            Multi-stage build <span className="hint">(recommended: build tools stay out of the final image)</span>
+          </Check>
+        </div>
+        {!form.multistage && (
+          <fieldset>
+            <legend>One stage</legend>
+            {meta.stageModes.map((m) => (
+              <label className="check" key={m}>
+                <input type="radio" name="stageMode" checked={form.stageMode === m} onChange={() => set('stageMode', m)} />
+                <span>{LABELS.stageModes[m]}</span>
+              </label>
+            ))}
+            <span className="hint">
+              {form.stageMode === 'production'
+                ? 'Compiled languages and static sites copy what you built before docker build; the notes name the exact commands.'
+                : 'Everything the build needs stays in the image, so it builds on its own but is larger.'}
+            </span>
+          </fieldset>
+        )}
+      </Section>
+
+      {show.compose && <Networks form={form} set={set} show={show} />}
+
+      {show.compose && (
+        <MultiField
+          label="Environments"
+          hint="A compose override per environment, layered over the base file. dev also gets a Dockerfile.dev with live reload."
+          options={opts(['dev', 'qa', 'staging', 'prod'], LABELS.envs)}
+          value={form.envs}
+          placeholder="Name, e.g. uat"
+          onChange={(v) => set('envs', v)}
         />
       )}
 
       <Section title="Container">
+        {show.compose && (
+          <SelectField
+            label="Compose restart policy"
+            hint="Applied to every service in the compose file."
+            value={form.restart}
+            onChange={(v) => set('restart', v)}
+            options={['', ...meta.restartPolicies].map((v) => ({ value: v, label: LABELS.restart[v] }))}
+          />
+        )}
         <ChoiceField
           label="Healthcheck path"
           hint="Adds a HEALTHCHECK probing this path."
@@ -187,6 +241,23 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
               placeholder="CI"
               onChange={(v) => set('pipelineName', v)}
             />
+            {show.multi && (
+              <div className="field">
+                <Check checked={form.changedOnly} onChange={(v) => set('changedOnly', v)}>
+                  Only what changed <span className="hint">(test, build and deploy the services whose folder changed)</span>
+                </Check>
+              </div>
+            )}
+            {show.multi && form.changedOnly && (
+              <MultiField
+                label="Paths that rebuild every service"
+                hint="Globs, e.g. libs/**. The pipeline file always does."
+                options={opts(['libs/**', 'shared/**', 'package.json', 'docker-compose*.yml'])}
+                value={form.sharedPaths}
+                placeholder="Path or glob"
+                onChange={(v) => set('sharedPaths', v)}
+              />
+            )}
             <div className="field">
               <Check checked={form.testJob} onChange={(v) => set('testJob', v)}>
                 Test job <span className="hint">(untick to generate no test job)</span>
@@ -201,7 +272,7 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
                 onChange={(v) => set('ciSteps', v)}
               />
             )}
-            {form.testJob && (
+            {form.testJob && show.versions && (
               <MultiField
                 label="Runtime versions to test"
                 hint="One matrix entry per version. None = the project's own version."
@@ -233,54 +304,55 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
             )}
           </Section>
 
-          <Section title="Triggers">
+          <Section title="When the pipeline runs">
+            <p className="hint block">Tick every event that should start it. Each one is independent: a manual-only pipeline needs no push.</p>
+
             <div className="field">
-              <Check checked={form.pullRequests} onChange={(v) => set('pullRequests', v)}>
-                Pull / merge requests
-              </Check>
-              {show.can('release') && (
-                <Check checked={form.release} onChange={(v) => set('release', v)}>
-                  When a release is published
-                </Check>
-              )}
-              <Check checked={form.manual} onChange={(v) => set('manual', v)}>
-                Manual runs
+              <Check checked={form.pushEvent} onChange={(v) => set('pushEvent', v)}>
+                A push to a branch
               </Check>
             </div>
-            <MultiField
-              label="Push to branches"
-              hint="Globs allowed (release/*). None = no branch pushes."
-              options={opts(PRESETS.branches)}
-              value={form.branches}
-              placeholder="Branch or glob"
-              onChange={(v) => set('branches', v)}
-            />
-            {show.can('branchIgnore') && (
-              <MultiField
-                label="Never run for branches"
-                options={opts(PRESETS.branchesIgnore)}
-                value={form.branchesIgnore}
-                placeholder="Branch or glob"
-                onChange={(v) => set('branchesIgnore', v)}
-              />
+            {form.pushEvent && (
+              <>
+                <MultiField
+                  label="Branches"
+                  hint="Globs allowed (release/*)."
+                  options={opts(PRESETS.branches)}
+                  value={form.branches}
+                  placeholder="Branch or glob"
+                  onChange={(v) => set('branches', v)}
+                />
+                {show.can('branchIgnore') && (
+                  <MultiField
+                    label="Never run for branches"
+                    options={opts(PRESETS.branchesIgnore)}
+                    value={form.branchesIgnore}
+                    placeholder="Branch or glob"
+                    onChange={(v) => set('branchesIgnore', v)}
+                  />
+                )}
+              </>
             )}
-            <MultiField
-              label="Push of tags"
-              hint="Globs such as v*. None = no tag runs."
-              options={opts(PRESETS.tags)}
-              value={form.tags}
-              placeholder="Tag glob"
-              onChange={(v) => set('tags', v)}
-            />
-            {show.can('tagFilters') && (
-              <MultiField
-                label="Never run for tags"
-                options={opts(PRESETS.tagsIgnore)}
-                value={form.tagsIgnore}
-                placeholder="Tag glob"
-                onChange={(v) => set('tagsIgnore', v)}
-              />
+
+            <div className="field">
+              <Check checked={form.tagEvent} onChange={(v) => set('tagEvent', v)}>
+                A tag is pushed
+              </Check>
+            </div>
+            {form.tagEvent && (
+              <>
+                <MultiField label="Tags" hint="Globs such as v*." options={opts(PRESETS.tags)} value={form.tags} placeholder="Tag glob" onChange={(v) => set('tags', v)} />
+                {show.can('tagFilters') && (
+                  <MultiField label="Never run for tags" options={opts(PRESETS.tagsIgnore)} value={form.tagsIgnore} placeholder="Tag glob" onChange={(v) => set('tagsIgnore', v)} />
+                )}
+              </>
             )}
+
+            <div className="field">
+              <Check checked={form.pullRequests} onChange={(v) => set('pullRequests', v)}>
+                A pull / merge request
+              </Check>
+            </div>
             {show.can('prBranches') && form.pullRequests && (
               <MultiField
                 label="Pull requests targeting"
@@ -291,11 +363,47 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
                 onChange={(v) => set('prBranches', v)}
               />
             )}
-            {show.can('paths') && (
+
+            <div className="field">
+              <Check checked={form.manual} onChange={(v) => set('manual', v)}>
+                A manual run <span className="hint">(workflow_dispatch / Run pipeline)</span>
+              </Check>
+            </div>
+
+            {show.can('release') && (
+              <div className="field">
+                <Check checked={form.release} onChange={(v) => set('release', v)}>
+                  A release is published
+                </Check>
+              </div>
+            )}
+
+            {show.can('schedule') && (
+              <>
+                <div className="field">
+                  <Check checked={form.scheduleEvent} onChange={(v) => set('scheduleEvent', v)}>
+                    On a schedule
+                  </Check>
+                </div>
+                {form.scheduleEvent && (
+                  <MultiField
+                    label="Schedules"
+                    hint="Cron entries (5 fields), UTC."
+                    options={PRESETS.schedules.map((o) => ({ value: o.value, label: `${o.label} (${o.value})` }))}
+                    value={form.schedule}
+                    separator={null}
+                    placeholder="Cron, e.g. 30 2 * * 1"
+                    onChange={(v) => set('schedule', v)}
+                  />
+                )}
+              </>
+            )}
+
+            {show.can('paths') && (form.pushEvent || form.pullRequests) && (
               <>
                 <MultiField
                   label="Only when these paths change"
-                  hint="None = always."
+                  hint="For pushes and pull requests. None = always."
                   options={opts(PRESETS.paths)}
                   value={form.paths}
                   placeholder="Path glob"
@@ -310,16 +418,8 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
                 />
               </>
             )}
-            {show.can('schedule') && (
-              <MultiField
-                label="Schedules"
-                hint="Cron entries (5 fields), UTC."
-                options={PRESETS.schedules.map((o) => ({ value: o.value, label: `${o.label} (${o.value})` }))}
-                value={form.schedule}
-                separator={null}
-                placeholder="Cron, e.g. 30 2 * * 1"
-                onChange={(v) => set('schedule', v)}
-              />
+            {!form.pushEvent && !form.tagEvent && !form.pullRequests && !form.manual && !form.release && !form.scheduleEvent && (
+              <p className="hint block error">Pick at least one event, or the pipeline would never run.</p>
             )}
           </Section>
 
@@ -458,6 +558,9 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
               onChange={(v) => set('deploy', v)}
               options={meta.targets.map((t) => ({ value: t.id, label: t.label }))}
             />
+            {form.deploy === 'kubernetes' && (
+              <TextField label="Replicas" hint="Pods per service (default 2)." value={form.replicas} placeholder="2" inputMode="numeric" onChange={(v) => set('replicas', v)} />
+            )}
             {show.registryChoice && (
               <SelectField
                 label="Image registry"
@@ -466,7 +569,8 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
                 options={show.registries.map((r) => ({ value: r.id, label: r.label }))}
               />
             )}
-            {show.deployMore && (
+            {show.deployMore && form.deployTo.length > 0 && <DeployEnvs form={form} set={set} meta={meta} />}
+            {show.deployMore && form.deployTo.length === 0 && (
               <>
                 <SelectField
                   label="Deploy when"
@@ -483,6 +587,7 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
                   placeholder="Environment name"
                   onChange={(v) => set('environment', v)}
                 />
+                <DeployEnvs form={form} set={set} meta={meta} />
               </>
             )}
             {show.oidc && (

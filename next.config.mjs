@@ -11,6 +11,7 @@ const securityHeaders = [
 const nextConfig = {
   // The generator is plain Node code that reads and writes the local disk, so keep it on the server.
   poweredByHeader: false,
+  agentRules: false, // Next 16 would otherwise write an AGENTS.md into the repository on every dev start
   reactStrictMode: true,
   async headers() {
     return [

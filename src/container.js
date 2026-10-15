@@ -13,6 +13,12 @@ export const argLines = (c) =>
     `ENV ${name}=$${name}`,
   ]);
 
+/** Image flavors: `alpine` (musl, busybox) or `slim` (Debian/Ubuntu based). */
+export const VARIANTS = ['alpine', 'slim'];
+/** `multi`: build stage + small runtime stage. `production`: one runtime-only stage. `mixed`: one stage with the build tools and the app. */
+export const MODES = ['multi', 'production', 'mixed'];
+export const DEFAULT_BUILD = { variant: null, mode: 'multi' };
+
 export const apk = (c) => c.packages.length > 0 && `RUN apk add --no-cache ${c.packages.join(' ')}`;
 
 export const apt = (c) =>
@@ -22,14 +28,25 @@ export const apt = (c) =>
     '    && rm -rf /var/lib/apt/lists/*',
   ];
 
+/** OS packages with whatever installer the flavor has. */
+export const pkgs = (c, variant) => (variant === 'alpine' ? apk(c) : apt(c));
+
+/** A non-root system user `app` (and its group) on either flavor. */
+export const systemUser = (variant, uid = 10001) =>
+  variant === 'alpine' ? `RUN addgroup -S -g ${uid} app && adduser -S -u ${uid} -G app app` : `RUN useradd --system --uid ${uid} app`;
+
 /**
- * `kind` is how the image can probe itself: 'wget' (alpine/busybox), 'curl', 'python' (urllib) or 'tcp' (bash only:
+ * `kind` is how the image can probe itself: 'wget' (alpine/busybox), 'curl', 'python' (urllib), 'node' (fetch) or 'tcp' (bash only:
  * the .NET and Temurin images ship neither curl nor wget, so the path is not requested there).
  */
 export function healthcheck(c, port, kind) {
   if (!c.healthcheck) return null;
   const url = `http://127.0.0.1:${port}${c.healthcheck}`;
   if (kind === 'wget') return `HEALTHCHECK ${OPTIONS} CMD wget -qO /dev/null ${url} || exit 1`;
+  if (kind === 'node') {
+    const code = `fetch('${url}').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))`;
+    return `HEALTHCHECK ${OPTIONS} CMD ${JSON.stringify(['node', '-e', code])}`;
+  }
   if (kind === 'curl') return `HEALTHCHECK ${OPTIONS} CMD curl -fsS -o /dev/null ${url} || exit 1`;
   if (kind === 'python') {
     const code = `import urllib.request; urllib.request.urlopen('${url}', timeout=3)`;
@@ -39,19 +56,27 @@ export function healthcheck(c, port, kind) {
 }
 
 /**
- * Runtime stage for statically linked binaries (Go, Rust): a small alpine image that keeps healthchecks,
- * OS packages and a non-root user available. Expects the build stage to leave the binary at /out/app.
+ * Runtime stage for a binary (Go, Rust): a small image that keeps healthchecks, OS packages and a non-root user available.
+ * `copy` is the Dockerfile line that puts the binary at `binary` (from the build stage, or from the build context).
+ * alpine: `alpine:3` (the binary must be static or musl); slim: `debian:bookworm-slim` (no curl or wget, so the probe only checks the port).
  */
-export const alpineRuntime = (c, port, binary = '/usr/local/bin/app') => [
-  'FROM alpine:3 AS runtime',
-  'RUN apk add --no-cache ca-certificates tzdata',
-  apk(c),
-  'RUN adduser -S -u 10001 app',
-  `COPY --from=build /out/app ${binary}`,
-  'USER app',
-  `ENV PORT=${port}`,
-  envLines(c),
-  `EXPOSE ${port}`,
-  healthcheck(c, port, 'wget'),
-  `ENTRYPOINT ["${binary}"]`,
-];
+export function binaryRuntime(c, port, variant, copy, binary = '/usr/local/bin/app') {
+  const alpine = variant === 'alpine';
+  return [
+    alpine ? 'FROM alpine:3 AS runtime' : 'FROM debian:bookworm-slim AS runtime',
+    alpine
+      ? ['RUN apk add --no-cache ca-certificates tzdata', apk(c)]
+      : apt({ packages: ['ca-certificates', 'tzdata', ...c.packages] }),
+    alpine ? 'RUN adduser -S -u 10001 app' : 'RUN useradd --system --uid 10001 app',
+    copy,
+    'USER app',
+    `ENV PORT=${port}`,
+    envLines(c),
+    `EXPOSE ${port}`,
+    healthcheck(c, port, alpine ? 'wget' : 'tcp'),
+    `ENTRYPOINT ["${binary}"]`,
+  ];
+}
+
+/** The classic runtime stage: alpine, binary from the build stage's /out/app. */
+export const alpineRuntime = (c, port, binary = '/usr/local/bin/app') => binaryRuntime(c, port, 'alpine', `COPY --from=build /out/app ${binary}`, binary);

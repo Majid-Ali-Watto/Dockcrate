@@ -5,7 +5,7 @@ import { post } from '../lib/client.js';
 
 export default function FolderPicker({ open, startDir, home, onClose, onChoose }) {
   const dialog = useRef(null);
-  const [state, setState] = useState({ dir: '', parent: null, stack: null, entries: [] });
+  const [state, setState] = useState({ dir: '', parent: null, entries: [] });
   const [message, setMessage] = useState('');
 
   async function go(dir) {
@@ -48,7 +48,6 @@ export default function FolderPicker({ open, startDir, home, onClose, onChoose }
           <li key={e.name}>
             <button type="button" onClick={() => go(`${state.dir.replace(/\/$/, '')}/${e.name}`)}>
               <span>📁 {e.name}</span>
-              {e.stack && <span className="badge">{e.stack}</span>}
             </button>
           </li>
         ))}
@@ -61,7 +60,7 @@ export default function FolderPicker({ open, startDir, home, onClose, onChoose }
           Cancel
         </button>
         <button type="button" className="primary" onClick={() => onChoose(state.dir)}>
-          {state.stack ? `Use this folder (${state.stack})` : 'Use this folder'}
+          Use this folder
         </button>
       </div>
     </dialog>

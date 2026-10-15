@@ -1,15 +1,7 @@
-import { find, has, read, lines } from '../fsutil.js';
-import { alpineRuntime } from '../container.js';
+import { lines } from '../fsutil.js';
+import { DEFAULT_BUILD, apk, binaryRuntime, envLines, healthcheck, pkgs, systemUser } from '../container.js';
 
 const DEFAULT_VERSION = '1.25';
-
-/** Directory of the main package: the repo root, else the shallowest cmd/<name>. */
-function mainPackage(dir) {
-  const mains = find(dir, (f) => f === 'main.go', 2)
-    .map((p) => p.replace(/\/?main\.go$/, '') || '.')
-    .sort((a, b) => (a === '.' ? -1 : b === '.' ? 1 : a.split('/').length - b.split('/').length || a.localeCompare(b)));
-  return { main: mains[0], others: Math.max(mains.length - 1, 0) };
-}
 
 export const go = {
   id: 'go',
@@ -25,41 +17,84 @@ export const go = {
   ignore: ['*.test', '*.out', 'vendor'],
   starter: (opts) => ({ main: '.', others: 0, detected: opts.runtime ?? DEFAULT_VERSION, version: opts.runtime ?? DEFAULT_VERSION }),
   assumes: (i) => `a go.mod at the repo root and a main package in ${i.main === '.' ? 'the repo root' : i.main}`,
-  detect(dir, opts) {
-    if (!has(dir, 'go.mod')) return null;
-    const detected = read(dir, 'go.mod').match(/^go\s+(\d+\.\d+)/m)?.[1];
-    return { ...mainPackage(dir), detected, version: opts.runtime ?? detected ?? DEFAULT_VERSION };
-  },
-  dockerfile: (i, port, c) =>
-    lines(
+  // No bind mount: compose watch syncs the source and restarts `go run`, which rebuilds.
+  dev: (i, port, c) => ({
+    dockerfile: lines(
       '# syntax=docker/dockerfile:1',
-      `FROM golang:${i.version}-alpine AS build`,
+      `FROM golang:${i.version}-alpine`,
+      'WORKDIR /src',
+      apk(c),
+      'COPY go.mod go.sum* ./',
+      'RUN go mod download',
+      'COPY . .',
+      `ENV PORT=${port}`,
+      envLines(c),
+      `EXPOSE ${port}`,
+      `CMD ${JSON.stringify(['go', 'run', i.main === '.' ? '.' : `./${i.main}`])}`,
+    ),
+    workdir: '/src',
+    mode: 'watch',
+    volumes: [],
+  }),
+  dockerfile(i, port, c, b = DEFAULT_BUILD) {
+    const v = b.variant ?? 'alpine';
+    const target = i.main === '.' ? '.' : `./${i.main}`;
+    const probe = v === 'alpine' ? 'wget' : 'tcp';
+    if (b.mode === 'production') return lines('# syntax=docker/dockerfile:1', binaryRuntime(c, port, v, 'COPY app /usr/local/bin/app'));
+    if (b.mode === 'mixed') {
+      // One image: the Go toolchain builds the binary and the same image runs it.
+      return lines(
+        '# syntax=docker/dockerfile:1',
+        v === 'alpine' ? `FROM golang:${i.version}-alpine` : `FROM golang:${i.version}-bookworm`,
+        'WORKDIR /src',
+        pkgs(c, v),
+        'COPY go.mod go.sum* ./',
+        'RUN go mod download',
+        'COPY . .',
+        `RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /usr/local/bin/app ${target}`,
+        systemUser(v),
+        'USER app',
+        `ENV PORT=${port}`,
+        envLines(c),
+        `EXPOSE ${port}`,
+        healthcheck(c, port, probe),
+        'ENTRYPOINT ["/usr/local/bin/app"]',
+      );
+    }
+    return lines(
+      '# syntax=docker/dockerfile:1',
+      v === 'alpine' ? `FROM golang:${i.version}-alpine AS build` : `FROM golang:${i.version}-bookworm AS build`,
       'WORKDIR /src',
       'COPY go.mod go.sum* ./',
       'RUN --mount=type=cache,target=/go/pkg/mod go mod download',
       'COPY . .',
       'RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \\',
-      `    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app ${i.main === '.' ? '.' : `./${i.main}`}`,
+      `    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app ${target}`,
       '',
-      alpineRuntime(c, port),
-    ),
+      binaryRuntime(c, port, v, 'COPY --from=build /out/app /usr/local/bin/app'),
+    );
+  },
+  variants: ['alpine', 'slim'],
+  defaultVariant: 'alpine',
+  healthKind: (b) => (b.variant === 'alpine' ? 'wget' : 'tcp'),
+  buildNotes: (i, b) => [
+    b.mode === 'production' && `Production only: the image copies a binary called app from the project root, so build it first: CGO_ENABLED=0 go build -o app ${i.main === '.' ? '.' : `./${i.main}`} (the generated pipeline builds the image from the repository as it is).`,
+    b.mode === 'mixed' && 'Build and production in one image: it keeps the Go toolchain and the sources next to the binary, so it is much bigger than a multi-stage image.',
+  ],
   ci(i, v = i.version, selected) {
     const on = (step) => selected.includes(step);
     return {
       image: `golang:${v}`,
       steps: [
         { uses: 'actions/setup-go@v5', with: { 'go-version': v } },
-        on('lint') && { run: 'go vet ./...' },
-        on('test') && { run: 'go test ./...' },
-        on('build') && { run: 'go build ./...' },
-        on('audit') && { run: ['go install golang.org/x/vuln/cmd/govulncheck@latest', 'govulncheck ./...'] },
+        on('lint') && { run: 'go vet ./...', ciStep: 'lint' },
+        on('test') && { run: 'go test ./...', ciStep: 'test' },
+        on('build') && { run: 'go build ./...', ciStep: 'build' },
+        on('audit') && { run: ['go install golang.org/x/vuln/cmd/govulncheck@latest', 'govulncheck ./...'], ciStep: 'audit' },
       ],
     };
   },
   notes: (i, port) => [
     `The binary is built with CGO disabled and must listen on the PORT environment variable (set to ${port}) on 0.0.0.0.`,
-    !i.detected && `Could not read the Go version from go.mod; assuming ${DEFAULT_VERSION}. Use --runtime to set it.`,
-    !i.main && 'No main.go found in the repo root or cmd/*; the build assumes the repo root.',
-    i.others > 0 && `${i.others + 1} main packages found; building ${i.main}. Edit the go build line in the Dockerfile to pick another.`,
   ],
 };

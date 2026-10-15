@@ -1,21 +1,10 @@
-import { readdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { has, read, lines } from '../fsutil.js';
-import { apt, envLines, healthcheck } from '../container.js';
+import { lines } from '../fsutil.js';
+import { DEFAULT_BUILD, apt, envLines, healthcheck, pkgs, systemUser } from '../container.js';
 
 const SYNTAX = '# syntax=docker/dockerfile:1';
 const IGNORE = ['**/__pycache__', '*.pyc', '.venv', 'venv', '.pytest_cache', '.mypy_cache', '.ruff_cache'];
 
 const mentions = (i, name) => new RegExp(`(^|[^\\w-])${name}([^\\w-]|$)`, 'm').test(i.manifests);
-
-function inspect(dir, opts, framework, label) {
-  const manifests = ['requirements.txt', 'pyproject.toml'].map((f) => read(dir, f)).join('\n').toLowerCase();
-  const i = { manifests, version: opts.runtime ?? read(dir, '.python-version').match(/^\d+\.\d+/)?.[0] ?? '3.13' };
-  if (!mentions(i, framework)) return null;
-  i.pm = has(dir, 'uv.lock') ? 'uv' : has(dir, 'poetry.lock') ? 'poetry' : has(dir, 'requirements.txt') ? 'pip' : null;
-  if (!i.pm) throw new Error(`${label} project found but no requirements.txt, uv.lock or poetry.lock to install from`);
-  return i;
-}
 
 const INSTALL = {
   pip: ['COPY requirements.txt .', 'RUN pip install --no-cache-dir -r requirements.txt'],
@@ -33,22 +22,87 @@ const INSTALL = {
   ],
 };
 
-const dockerfile = (i, port, c, cmd) =>
-  lines(
+const VENV = '/opt/venv';
+const ENV_PY = 'ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1';
+const UV = 'COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv';
+
+/** Compilers for packages that ship no wheel: kept out of the final image by the multi-stage build. */
+const compilers = (v) =>
+  v === 'alpine'
+    ? 'RUN apk add --no-cache build-base'
+    : ['RUN apt-get update \\', '    && apt-get install -y --no-install-recommends build-essential \\', '    && rm -rf /var/lib/apt/lists/*'];
+
+// The build stage installs into a virtualenv, which the runtime stage copies as it is.
+const INSTALL_VENV = {
+  pip: [`RUN python -m venv ${VENV}`, `ENV VIRTUAL_ENV=${VENV} PATH="${VENV}/bin:$PATH"`, 'COPY requirements.txt .', 'RUN pip install --no-cache-dir -r requirements.txt'],
+  uv: [UV, `ENV UV_COMPILE_BYTECODE=1 UV_PROJECT_ENVIRONMENT=${VENV} PATH="${VENV}/bin:$PATH"`, 'COPY pyproject.toml uv.lock ./', 'RUN uv sync --frozen --no-dev --no-install-project'],
+  poetry: [
+    'RUN pip install --no-cache-dir poetry',
+    `RUN python -m venv ${VENV}`,
+    `ENV POETRY_VIRTUALENVS_CREATE=false VIRTUAL_ENV=${VENV} PATH="${VENV}/bin:$PATH"`,
+    'COPY pyproject.toml poetry.lock ./',
+    'RUN poetry install --no-root --only main',
+  ],
+};
+
+/**
+ * multi: a build stage (compilers, virtualenv) and a runtime stage that only copies the virtualenv.
+ * production: one stage, production dependencies installed straight into the image, no compilers.
+ * mixed: one stage with compilers and every dependency (development ones too) next to the app.
+ */
+const dockerfile = (i, port, c, cmd, b = DEFAULT_BUILD) => {
+  const v = b.variant ?? 'slim';
+  const image = `FROM python:${i.version}-${v}`;
+  const tail = [`EXPOSE ${port}`, healthcheck(c, port, 'python'), `CMD ${JSON.stringify(cmd)}`];
+  if (b.mode === 'multi') {
+    return lines(
+      SYNTAX,
+      `${image} AS build`,
+      ENV_PY,
+      'WORKDIR /app',
+      compilers(v),
+      INSTALL_VENV[i.pm],
+      '',
+      `${image} AS runtime`,
+      `${ENV_PY} VIRTUAL_ENV=${VENV} PATH="${VENV}/bin:$PATH"`,
+      envLines(c),
+      'WORKDIR /app',
+      pkgs(c, v),
+      systemUser(v),
+      `COPY --from=build ${VENV} ${VENV}`,
+      'COPY --chown=app:app . .',
+      'USER app',
+      tail,
+    );
+  }
+  const mixed = b.mode === 'mixed';
+  return lines(SYNTAX, image, ENV_PY, envLines(c), 'WORKDIR /app', mixed && compilers(v), pkgs(c, v), mixed ? DEV_INSTALL[i.pm] : INSTALL[i.pm], systemUser(v), 'COPY --chown=app:app . .', 'USER app', tail);
+};
+
+// Development image: same base, dev dependencies included, the source is bind mounted over /app and the server reloads.
+const DEV_INSTALL = {
+  pip: INSTALL.pip,
+  uv: [INSTALL.uv[0], INSTALL.uv[1], INSTALL.uv[2], 'RUN uv sync --frozen --no-install-project'],
+  poetry: [INSTALL.poetry[0], INSTALL.poetry[1], INSTALL.poetry[2], 'RUN poetry install --no-root'],
+};
+
+const devImage = (i, port, c, cmd) => ({
+  dockerfile: lines(
     SYNTAX,
     `FROM python:${i.version}-slim`,
     'ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1',
     envLines(c),
     'WORKDIR /app',
     apt(c),
-    INSTALL[i.pm],
-    'RUN useradd --system --uid 10001 app',
-    'COPY --chown=app:app . .',
-    'USER app',
+    DEV_INSTALL[i.pm],
+    'COPY . .',
     `EXPOSE ${port}`,
-    healthcheck(c, port, 'python'),
     `CMD ${JSON.stringify(cmd)}`,
-  );
+  ),
+  workdir: '/app',
+  mode: 'mount',
+  volumes: i.pm === 'uv' ? ['/app/.venv'] : [],
+});
 
 const RUNNER = { pip: '', uv: 'uv run ', poetry: 'poetry run ' };
 const CI_STEPS = ['lint', 'test', 'audit'];
@@ -74,6 +128,9 @@ const auditSteps = (i) =>
     poetry: [{ run: 'poetry run pip install pip-audit' }, { run: 'poetry run pip-audit' }],
   })[i.pm];
 
+/** Marks steps as belonging to one CI step, so a manual run can switch them off. */
+const forStep = (ciStep, steps) => steps.map((s) => ({ ...s, ciStep }));
+
 function ci(i, command, selected, v = i.version) {
   const on = (step) => selected.includes(step);
   const setup = {
@@ -89,9 +146,9 @@ function ci(i, command, selected, v = i.version) {
         with: { 'python-version': v, ...(i.pm === 'pip' && { cache: 'pip' }) },
       },
       ...setup,
-      ...(on('lint') ? [{ run: 'pip install ruff' }, { run: 'ruff check .' }] : []),
-      ...(on('test') ? testSteps(i, command) : []),
-      ...(on('audit') ? auditSteps(i) : []),
+      ...(on('lint') ? forStep('lint', [{ run: 'pip install ruff' }, { run: 'ruff check .' }]) : []),
+      ...(on('test') ? forStep('test', testSteps(i, command)) : []),
+      ...(on('audit') ? forStep('audit', auditSteps(i)) : []),
     ],
   };
 }
@@ -99,6 +156,12 @@ function ci(i, command, selected, v = i.version) {
 const ciNotes = (i, selected, command) => [
   selected.includes('test') && command === 'pytest' && !mentions(i, 'pytest') && 'pytest is not in your dependencies; the CI test step installs it.',
   selected.includes('lint') && 'Lint runs ruff with its defaults; add a ruff config to tune it.',
+];
+
+const buildNotes = (b) => [
+  b.variant === 'alpine' && 'Alpine uses musl: most packages have musl wheels, but those that do not are compiled from source (slower builds, and they need the compilers that only the multi-stage and mixed builds have).',
+  b.mode === 'production' && 'Production only: dependencies are installed straight into the final image without compilers, so a package with no wheel for this platform fails to install. Use multi-stage for those.',
+  b.mode === 'mixed' && 'Build and production in one image: it keeps compilers and your development dependencies next to the app, so it is bigger than a multi-stage image.',
 ];
 
 const TOOLS = ['pip', 'uv', 'poetry'];
@@ -111,6 +174,10 @@ export const fastapi = {
   tools: TOOLS,
   usesPackages: true,
   ecosystem: () => 'pip',
+  variants: ['alpine', 'slim'],
+  defaultVariant: 'slim',
+  healthKind: () => 'python',
+  buildNotes: (i, b) => buildNotes(b),
   codeql: 'python',
   devcontainer: (i) => `mcr.microsoft.com/devcontainers/python:1-${i.version}`,
   ciSteps: CI_STEPS,
@@ -119,27 +186,15 @@ export const fastapi = {
   ignore: IGNORE,
   starter: (opts) => ({ manifests: 'fastapi uvicorn', version: opts.runtime ?? '3.13', pm: opts.tool ?? 'pip', target: 'app.main:app' }),
   assumes: (i) => `your app object is app.main:app and dependencies are in ${MANIFEST[i.pm]}`,
-  detect(dir, opts) {
-    const i = inspect(dir, opts, 'fastapi', 'FastAPI');
-    if (!i) return null;
-    const candidates = ['main.py', 'app/main.py', 'src/main.py', 'app.py', 'app/app.py', 'src/app.py'];
-    for (const file of candidates) {
-      const variable = read(dir, file).match(/^(\w+)\s*=\s*FastAPI\(/m)?.[1];
-      if (variable) {
-        i.target = `${file.replace(/\.py$/, '').replaceAll('/', '.')}:${variable}`;
-        break;
-      }
-    }
-    return i;
+  dev(i, port, c) {
+    return devImage(i, port, c, ['uvicorn', i.target ?? 'app.main:app', '--host', '0.0.0.0', '--port', String(port), '--reload']);
   },
-  dockerfile(i, port, c) {
+  dockerfile(i, port, c, b) {
     const target = i.target ?? 'app.main:app';
-    return dockerfile(i, port, c, ['uvicorn', target, '--host', '0.0.0.0', '--port', String(port)]);
+    return dockerfile(i, port, c, ['uvicorn', target, '--host', '0.0.0.0', '--port', String(port)], b);
   },
   ci: (i, v, selected) => ci(i, 'pytest', selected, v),
   notes: (i) => [
-    !i.target && 'Could not find a FastAPI(...) app object; CMD assumes app.main:app. Edit it in the Dockerfile.',
-    !/fastapi\[standard\]|uvicorn/.test(i.manifests) && 'Add uvicorn (or fastapi[standard]) to your dependencies: CMD runs uvicorn.',
   ],
 };
 
@@ -151,6 +206,10 @@ export const django = {
   usesName: true,
   usesPackages: true,
   ecosystem: () => 'pip',
+  variants: ['alpine', 'slim'],
+  defaultVariant: 'slim',
+  healthKind: () => 'python',
+  buildNotes: (i, b) => buildNotes(b),
   codeql: 'python',
   devcontainer: (i) => `mcr.microsoft.com/devcontainers/python:1-${i.version}`,
   ciSteps: CI_STEPS,
@@ -164,20 +223,11 @@ export const django = {
     wsgi: `${opts.name ?? 'config'}.wsgi:application`,
   }),
   assumes: (i) => `${i.wsgi.split('.')[0]}/wsgi.py exists and dependencies are in ${MANIFEST[i.pm]}`,
-  detect(dir, opts) {
-    if (!has(dir, 'manage.py')) return null;
-    const i = inspect(dir, opts, 'django', 'Django');
-    if (!i) return null;
-    const project = readdirSync(dir, { withFileTypes: true }).find((e) => e.isDirectory() && has(join(dir, e.name), 'wsgi.py'));
-    if (project) i.wsgi = `${project.name}.wsgi:application`;
-    return i;
-  },
-  dockerfile: (i, port, c) =>
-    dockerfile(i, port, c, ['gunicorn', i.wsgi ?? 'config.wsgi:application', '--bind', `0.0.0.0:${port}`]),
+  dev: (i, port, c) => devImage(i, port, c, ['python', 'manage.py', 'runserver', `0.0.0.0:${port}`]),
+  dockerfile: (i, port, c, b) =>
+    dockerfile(i, port, c, ['gunicorn', i.wsgi ?? 'config.wsgi:application', '--bind', `0.0.0.0:${port}`], b),
   ci: (i, v, selected) => ci(i, 'python manage.py test', selected, v),
   notes: (i) => [
-    !i.wsgi && 'Could not find <project>/wsgi.py; CMD assumes config.wsgi:application. Edit it in the Dockerfile.',
-    !mentions(i, 'gunicorn') && 'Add gunicorn to your dependencies: CMD runs gunicorn.',
     'Set ALLOWED_HOSTS and SECRET_KEY from env; run migrations and collectstatic as a release step (or an entrypoint).',
   ],
 };
