@@ -1,0 +1,25 @@
+{
+  "name": "shipkit",
+  "version": "0.1.0",
+  "description": "Generate Dockerfile, compose and CI/CD files for an existing or a new project (CLI + Next.js UI)",
+  "type": "module",
+  "bin": {
+    "shipkit": "bin/shipkit.js"
+  },
+  "engines": {
+    "node": ">=20.9"
+  },
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1",
+    "test": "node --test",
+    "icons": "node scripts/build-icons.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "next": "^16.4.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  }
+}
