@@ -3,6 +3,7 @@ import './globals.css';
 import { isHosted } from '../src/api.js';
 import { siteOrigin } from '../lib/site.js';
 import { Analytics } from '@vercel/analytics/next';
+import { SpeedInsights } from '@vercel/speed-insights/next';
 
 const title = 'Dockcrate · Docker & CI/CD file generator';
 const socialImage = {
@@ -72,6 +73,7 @@ export default async function RootLayout({ children }) {
       <body>
         {children}
         <Analytics />
+        <SpeedInsights />
       </body>
     </html>
   );
