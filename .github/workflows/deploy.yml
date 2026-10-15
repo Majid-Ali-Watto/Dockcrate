@@ -73,7 +73,6 @@ jobs:
     environment: production
     permissions:
       contents: read
-      id-token: write
     concurrency:
       group: deploy-production
       cancel-in-progress: false
@@ -85,12 +84,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-      # `vercel build` pulls the image below, so the runner needs the same VCR login as the push.
-      - uses: vercel/vcr-action/login@6888f841cb0d2255ef9dab40f068cba07234ef47 # v1
-        with:
-          team: ${{ vars.VERCEL_TEAM_ID }}
       # Vercel has no "deploy this image" flag: a deployment is built from a Dockerfile.vercel, so the deployed
       # project is just that file pointing at the image tested and pushed above. No source code is uploaded.
+      # Vercel does the build (a local `vercel build --prebuilt` produces no container, so the site would 404);
+      # its build pulls the image from VCR with the project's own credentials.
       # USER root and PORT=80 because Vercel sends traffic to port 80 unless the project sets PORT.
       - name: Deploy the image
         run: |
@@ -98,6 +95,4 @@ jobs:
           printf '%s\n' '{"framework":null}' > deploy/vercel.json
           printf 'FROM %s\nUSER root\nENV PORT=80\n' "$IMAGE" > deploy/Dockerfile.vercel
           cd deploy
-          npx --yes vercel@59.26.0 pull --yes --environment=production --token "$VERCEL_TOKEN"
-          npx --yes vercel@59.26.0 build --prod --token "$VERCEL_TOKEN"
-          npx --yes vercel@59.26.0 deploy --prebuilt --prod --token "$VERCEL_TOKEN"
+          npx --yes vercel@59.26.0 deploy --prod --token "$VERCEL_TOKEN"

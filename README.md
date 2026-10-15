@@ -186,7 +186,7 @@ Each run lists exactly which secrets and variables to create. Ticking `id-token:
 
 The site is deployed by CI/CD, not by Vercel's Git integration (`vercel.json` sets `git.deploymentEnabled` to `false`). On every push to `main`, `.github/workflows/deploy.yml` tests, builds the `Dockerfile`, pushes the image to Vercel Container Registry (`vcr.vercel.com/<team>/<project>/dockcrate:<commit>`), waits for VCR to optimize it, and deploys that image. Pull requests only test and build.
 
-Vercel has no "deploy this image" flag, so the deploy step is a `Dockerfile.vercel` (`FROM` the pushed image) built from an otherwise empty folder: what runs is exactly the image that was pushed. To set it up:
+Vercel has no "deploy this image" flag, so the deploy step is a `Dockerfile.vercel` (`FROM` the pushed image) that Vercel builds from an otherwise empty folder (`vercel deploy --prod`, not `--prebuilt`: a local `vercel build` produces no container and the site would 404): what runs is exactly the image that was pushed. To set it up:
 
 - GitHub variables `VERCEL_TEAM_ID`, `VERCEL_TEAM_SLUG`, `VERCEL_PROJECT_ID`, `VERCEL_PROJECT_NAME`, and the secret `VERCEL_TOKEN`; a GitHub environment named `production`;
 - on the Vercel team, a VCR OIDC policy with read-write access to the project (the push logs in with GitHub OIDC, no stored key);
