@@ -21,9 +21,9 @@ import {
   EXTRAS,
 } from '../src/generate.js';
 
-const HELP = `shipkit - generate Dockerfile, docker-compose and CI/CD files for an existing or a new project
+const HELP = `dockcrate - generate Dockerfile, docker-compose and CI/CD files for an existing or a new project
 
-Usage: shipkit [dir] [options]
+Usage: dockcrate [dir] [options]
 
   dir                  project directory (default: current directory)
   --new                new project: no folder is read; you choose the stack and tools (needs --stack)
@@ -59,6 +59,7 @@ Usage: shipkit [dir] [options]
   --pipeline-env N=v   pipeline-wide environment variable (repeatable)
   --image-tags <list>  image tags besides the commit sha: branch, tag, semver, latest (default: branch,tag,latest)
   --scan-severity <l>  Trivy severities that fail the scan (default: HIGH,CRITICAL)
+  --no-pin-actions     reference GitHub actions by tag instead of full commit SHA (SHAs are the default)
   --no-dep-cache       do not cache dependencies in CI (GitHub)
   --no-layer-cache     do not use the Docker layer cache (GitHub)
   --edits <file.json>  your edits to generated blocks: { "<file>": { "blocks": { "<id>": { "text"?, "disabled"? } }, "add": [...] } }
@@ -126,11 +127,11 @@ function serve(port) {
     const build = spawnSync(process.execPath, [next, 'build'], { cwd: ROOT, stdio: 'inherit' });
     if (build.status !== 0) throw new Error('the UI build failed');
   }
-  console.log(`shipkit UI: http://localhost:${port}  (Ctrl+C to stop)`);
+  console.log(`dockcrate UI: http://localhost:${port}  (Ctrl+C to stop)`);
   const child = spawn(process.execPath, [next, 'start', '-H', '127.0.0.1', '-p', String(port)], {
     cwd: ROOT,
     stdio: 'inherit',
-    env: { ...process.env, SHIPKIT_CWD: process.cwd() }, // the UI opens on the folder you launched it from
+    env: { ...process.env, DOCKCRATE_CWD: process.cwd() }, // the UI opens on the folder you launched it from
   });
   child.on('exit', (code) => process.exit(code ?? 0));
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
@@ -168,6 +169,7 @@ try {
       'pipeline-env': { type: 'string', multiple: true },
       'image-tags': { type: 'string' },
       'scan-severity': { type: 'string' },
+      'no-pin-actions': { type: 'boolean' },
       'no-dep-cache': { type: 'boolean' },
       'no-layer-cache': { type: 'boolean' },
       edits: { type: 'string' },
@@ -238,6 +240,7 @@ try {
     pipelineEnv: values['pipeline-env'],
     imageTags: csv(values['image-tags']),
     scanSeverity: csv(values['scan-severity']),
+    pinActions: values['no-pin-actions'] ? false : undefined,
     depCache: values['no-dep-cache'] ? false : undefined,
     layerCache: values['no-layer-cache'] ? false : undefined,
     edits: values.edits ? JSON.parse(readFileSync(resolve(values.edits), 'utf8')) : undefined,
@@ -280,6 +283,6 @@ try {
   }
   if (notes.length) console.log(`\nNotes:\n${notes.map((n) => `  - ${n}`).join('\n')}`);
 } catch (err) {
-  console.error(`shipkit: ${err.message}`);
+  console.error(`dockcrate: ${err.message}`);
   process.exit(1);
 }

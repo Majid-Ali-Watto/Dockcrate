@@ -160,8 +160,15 @@ export const REGISTRIES = {
   },
 };
 
-const k8sDeployment = ({ appName, port }) =>
-  lines(
+const k8sDeployment = ({ appName, port, healthcheck = '' }) => {
+  // With a health path the probes hit it; otherwise they only check that the port accepts connections.
+  const probe = (kind, delay, period) => [
+    `          ${kind}Probe:`,
+    ...(healthcheck ? ['            httpGet:', `              path: ${healthcheck}`, `              port: ${port}`] : ['            tcpSocket:', `              port: ${port}`]),
+    `            initialDelaySeconds: ${delay}`,
+    `            periodSeconds: ${period}`,
+  ];
+  return lines(
     'apiVersion: apps/v1',
     'kind: Deployment',
     'metadata:',
@@ -178,22 +185,27 @@ const k8sDeployment = ({ appName, port }) =>
     '      labels:',
     `        app: ${appName}`,
     '    spec:',
+    '      automountServiceAccountToken: false',
+    '      securityContext:',
+    '        seccompProfile:',
+    '          type: RuntimeDefault',
     '      containers:',
     '        - name: app',
     '          # Replaced with the freshly built image by the pipeline',
     '          image: IMAGE_PLACEHOLDER',
     '          ports:',
     `            - containerPort: ${port}`,
-    '          readinessProbe:',
-    '            tcpSocket:',
-    `              port: ${port}`,
-    '            initialDelaySeconds: 5',
-    '            periodSeconds: 10',
-    '          livenessProbe:',
-    '            tcpSocket:',
-    `              port: ${port}`,
-    '            initialDelaySeconds: 15',
-    '            periodSeconds: 20',
+    '          # Settings such as DATABASE_URL: create the Secret, the pods start without it',
+    '          envFrom:',
+    '            - secretRef:',
+    `                name: ${appName}-env`,
+    '                optional: true',
+    probe('readiness', 5, 10),
+    probe('liveness', 15, 20),
+    '          securityContext:',
+    '            allowPrivilegeEscalation: false',
+    '            capabilities:',
+    '              drop: [ALL]',
     '          resources:',
     '            requests:',
     '              cpu: 100m',
@@ -201,6 +213,7 @@ const k8sDeployment = ({ appName, port }) =>
     '            limits:',
     '              memory: 512Mi',
   );
+};
 
 const k8sService = ({ appName, port }) =>
   lines(
@@ -315,7 +328,7 @@ export const TARGETS = {
       { path: 'k8s/service.yaml', content: k8sService(ctx) },
     ],
     notes: () => [
-      'Kubernetes: KUBE_CONFIG is your kubeconfig, base64-encoded (`base64 -w0 ~/.kube/config`). A private registry needs an imagePullSecret in the cluster; the Service is ClusterIP, so add an Ingress for public traffic.',
+      'Kubernetes: KUBE_CONFIG is your kubeconfig, base64-encoded (`base64 -w0 ~/.kube/config`). A private registry needs an imagePullSecret in the cluster; the Service is ClusterIP, so add an Ingress for public traffic. The pods read optional settings from a Secret named <app>-env (kubectl create secret generic <app>-env --from-literal=KEY=value).',
     ],
   },
 

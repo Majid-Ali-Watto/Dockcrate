@@ -66,7 +66,7 @@ const makefile = ({ appName, port, composeFile }) =>
     '\tdocker run --rm -i hadolint/hadolint < Dockerfile',
     '',
     'scan: build',
-    '\tdocker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image --severity HIGH,CRITICAL $(IMAGE)',
+    '\tdocker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.69.3 image --severity HIGH,CRITICAL $(IMAGE)',
   );
 
 const editorconfig = () =>

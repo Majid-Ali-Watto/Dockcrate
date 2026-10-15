@@ -22,7 +22,7 @@ export const rust = {
     if (!has(dir, 'Cargo.toml')) return null;
     const toml = read(dir, 'Cargo.toml');
     const pkg = toml.match(/^\[package\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/m)?.[1];
-    if (!pkg) throw new Error('Cargo.toml has no [package] table (a workspace root?); run shipkit in the crate folder you want to ship');
+    if (!pkg) throw new Error('Cargo.toml has no [package] table (a workspace root?); run dockcrate in the crate folder you want to ship');
     const detected = manifestField(pkg, 'rust-version');
     return {
       name: manifestField(pkg, 'name'),

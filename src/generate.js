@@ -267,6 +267,10 @@ export function generate(dir, opts = {}) {
     }
   }
 
+  if (pipeline?.targetId === 'kubernetes' && dbs.length && (!opts.include || opts.include.includes('deploy'))) {
+    notes.push(`Kubernetes does not get the compose services (${dbs.join(', ')}): run them in the cluster or use managed ones, then put their URLs (DATABASE_URL, REDIS_URL, ...) in the ${appName}-env Secret.`);
+  }
+
   const extras = extraFiles(opts.extras ?? [], { stack, info, provider: ci, appName, port, composeFile: composePath });
   if (!opts.include || opts.include.includes('repo')) notes.push(...extras.notes);
 
@@ -283,7 +287,7 @@ export function generate(dir, opts = {}) {
     ...(stack.files?.(info, port) ?? []).map((f) => ({ kind: 'dockerfile', ...f })),
     pipeline && { kind: 'ci', path: CI_FILES[ci].path, blocks: CI_FILES[ci].render(pipeline, (v) => stack.ci(info, v, selected)) },
     ...(pipeline ? (CI_FILES[ci].extraFiles?.(pipeline, stack) ?? []) : []).map((f) => ({ kind: 'ci', ...f })),
-    ...(pipeline?.target.files?.({ appName, port }) ?? []).map((f) => ({ kind: 'deploy', ...f })),
+    ...(pipeline?.target.files?.({ appName, port, healthcheck: c.healthcheck }) ?? []).map((f) => ({ kind: 'deploy', ...f })),
     ...extras.files,
   ].filter((f) => f && (!opts.include || opts.include.includes(f.kind)));
 

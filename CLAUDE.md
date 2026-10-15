@@ -1,6 +1,6 @@
-# Shipkit
+# Dockcrate
 
-Generates Dockerfile, `.dockerignore`, compose, CI/CD pipelines and deployment config for an existing or a new project. One generator (`src/`), two front ends: the CLI (`bin/shipkit.js`) and a Next.js 16 web UI (`app/`, `components/`, `lib/`). README.md is the user-facing doc; this file is for working on the code.
+Generates Dockerfile, `.dockerignore`, compose, CI/CD pipelines and deployment config for an existing or a new project. One generator (`src/`), two front ends: the CLI (`bin/dockcrate.js`) and a Next.js 16 web UI (`app/`, `components/`, `lib/`). README.md is the user-facing doc; this file is for working on the code.
 
 ## Commands
 
@@ -8,9 +8,10 @@ Generates Dockerfile, `.dockerignore`, compose, CI/CD pipelines and deployment c
 node --test                      # all tests (generator, API, zip); keep green
 npx next build                   # production build of the UI; must pass
 npm run dev                      # UI in dev mode (http://127.0.0.1:3000)
-node bin/shipkit.js serve        # production UI on http://localhost:4173 (rebuilds when sources are newer)
-node bin/shipkit.js --help       # CLI flags
+node bin/dockcrate.js serve        # production UI on http://localhost:4173 (rebuilds when sources are newer)
+node bin/dockcrate.js --help       # CLI flags
 npm run icons                    # regenerate every icon + the social image (needs Chrome/Chromium; CHROME_PATH to override)
+npm run pins                     # re-resolve the commit SHAs for every GitHub action the generator emits (git + network)
 ```
 
 Lighthouse (target: 100 in all four categories, mobile and desktop):
@@ -29,7 +30,7 @@ npx lighthouse@12 http://127.0.0.1:4173 --chrome-flags="--headless=new --no-sand
 - `src/api.js`: JSON handlers shared by the Next route handlers. `guard()` only accepts localhost `Host` and same-origin `Origin` (CSRF / DNS-rebinding protection); every route and the page go through it. It can only write the generated file names.
 - UI state lives in `lib/form.js` (`initialForm`, `toBody`, `visibility`); controls in `components/Sidebar.jsx` and `Controls.jsx`; preview and block editor in `Preview.jsx` and `BlockEditor.jsx`.
 - Head/SEO: `app/layout.jsx` (`generateMetadata`, `viewport`), `app/manifest.js`, `app/robots.js`, `app/sitemap.js`, JSON-LD in `app/page.jsx`. URLs use the request's own origin via `lib/site.js`.
-- Hosted mode (`isHosted()` in `src/api.js`: Vercel's `VERCEL` env or `SHIPKIT_HOSTED=1`): the site is public and the server disk is not the user's, so `/api/browse`, existing-project mode and `write` are refused server-side, `getMeta()` hides `cwd`/`home`, `guard()` skips only the Host check, and the UI hides the folder field and write button. Any new feature that reads or writes the disk, or exposes a server path, must be refused/hidden when hosted, with a test in `test/api.test.js`. Origins for canonical/OG/sitemap come from `lib/site.js` (`SITE_URL` > Vercel production domain > request host).
+- Hosted mode (`isHosted()` in `src/api.js`: Vercel's `VERCEL` env or `DOCKCRATE_HOSTED=1`): the site is public and the server disk is not the user's, so `/api/browse`, existing-project mode and `write` are refused server-side, `getMeta()` hides `cwd`/`home`, `guard()` skips only the Host check, and the UI hides the folder field and write button. Any new feature that reads or writes the disk, or exposes a server path, must be refused/hidden when hosted, with a test in `test/api.test.js`. Origins for canonical/OG/sitemap come from `lib/site.js` (`SITE_URL` > Vercel production domain > request host).
 - Security: `proxy.js` (nonce CSP, Next 16 name for middleware) and `next.config.mjs` (static headers).
 
 ## Keep everything in sync
@@ -38,9 +39,11 @@ A change is not done until the places below agree. Update them in the same chang
 
 | When you change | Also update |
 | --- | --- |
-| A CLI option or generator option | `bin/shipkit.js` (parseArgs flag **and** `HELP` text), validation in `src/generate.js`/`src/api.js`, `lib/form.js` + the Sidebar control, README option tables, tests |
+| A CLI option or generator option | `bin/dockcrate.js` (parseArgs flag **and** `HELP` text), validation in `src/generate.js`/`src/api.js`, `lib/form.js` + the Sidebar control, README option tables, tests |
 | A stack | `src/stacks/index.js`, `lib/form.js` (`STACK_ORDER`, `RUNTIMES`), README stack lists, tests, CodeQL/Dependabot hooks if applicable |
 | A CI provider or deploy target | `src/ci.js` (`CI_FILES`), `src/deploy.js`, README provider/target tables, `lib/form.js` labels, tests |
+| A GitHub action added or its version bumped (`uses:` in `src/`) | `npm run pins` (rewrites `src/providers/pins.js`), then `node --test`; an action without a pin silently ships as a movable tag |
+| A security tool version in generated output (Trivy, cosign, Hadolint) | check it against current advisories first (Trivy tags 0.0.1-0.34.2 and image 0.69.4+ were compromised in March 2026); the Trivy test in `test/generate.test.js` guards this |
 | Generated output text | the matching assertions in `test/generate.test.js` (many match exact generated text) |
 | The name, tagline or description | `package.json`, `app/layout.jsx`, `app/manifest.js`, JSON-LD in `app/page.jsx`, `scripts/build-icons.mjs` (social card), README, then `npm run icons` |
 | The logo or brand colors | `scripts/build-icons.mjs` only, then `npm run icons`; never hand-edit files in `public/icons`, `public/logo.svg`, `public/og-image.png`, `app/icon.svg`, `app/favicon.ico`, `app/apple-icon.png` |
@@ -69,4 +72,5 @@ A change is not done until the places below agree. Update them in the same chang
 - Setting `metadata.icons` replaces file-based `icon.svg`/`apple-icon.png` links, so the layout lists them explicitly (`favicon.ico` is still added from the file).
 - The proxy matcher skips `/api`, `/_next` and any path with a dot, so static files get headers from `next.config.mjs` only.
 - Remaining Lighthouse notes are unscored and come from the Next/React runtime, not app code: unused JS and legacy-JS polyfills in the framework chunks, and the ~40 ms stylesheet request. Our own heavy parts (folder picker, block editor, zip) are lazy-loaded.
+- Generated pipelines must not ship movable references to third-party code: actions are SHA-pinned (`pinActions`, default on, GitHub only) and tool images carry explicit tags, never `latest`.
 - Do not `pkill -f <pattern>` from a shell command that contains that pattern; it kills the shell. Stop a server by its port instead.

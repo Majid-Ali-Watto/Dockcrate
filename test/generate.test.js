@@ -7,7 +7,7 @@ import { generate, writeFiles } from '../src/generate.js';
 
 /** Creates a temp project dir from { 'relative/path': content }; objects are written as JSON. */
 function project(files) {
-  const dir = mkdtempSync(join(tmpdir(), 'shipkit-'));
+  const dir = mkdtempSync(join(tmpdir(), 'dockcrate-'));
   for (const [path, content] of Object.entries(files)) {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
     writeFileSync(join(dir, path), typeof content === 'string' ? content : JSON.stringify(content));
@@ -326,7 +326,7 @@ test('permissions: extras go top-level, id-token and packages only where needed'
 
 test('platforms add QEMU and the platforms input', () => {
   const { text } = ciOf({ platforms: ['linux/amd64', 'linux/arm64'] });
-  assert.match(text, /docker\/setup-qemu-action@v3/);
+  assert.match(text, /docker\/setup-qemu-action@[0-9a-f]{40} # v3/);
   assert.match(text, /platforms: "linux\/amd64,linux\/arm64"/);
   assert.doesNotMatch(ciOf({}).text, /qemu/);
 });
@@ -378,7 +378,7 @@ test('OIDC: id-token permission switches cloud login from stored keys to federat
 
 test('registry follows the target: Artifact Registry, ECR, ACR, GHCR', () => {
   assert.match(ciOf({ deploy: 'cloudrun' }).text, /-docker\.pkg\.dev\/\$\{\{ vars\.GCP_PROJECT \}\}\/\$\{\{ vars\.GAR_REPO \}\}\/app/);
-  assert.match(ciOf({ deploy: 'ecs' }).text, /amazon-ecr-login@v2/);
+  assert.match(ciOf({ deploy: 'ecs' }).text, /amazon-ecr-login@[0-9a-f]{40} # v2/);
   assert.match(ciOf({ deploy: 'azure' }).text, /az acr login/);
   assert.match(ciOf({ deploy: 'ssh' }).text, /ghcr\.io/);
 });
@@ -393,7 +393,7 @@ test('app name is a DNS-safe slug of the project name or folder', () => {
   const k8s = file(fresh({ stack: 'node', name: 'My_Shop.API', deploy: 'kubernetes' }), 'k8s/deployment.yaml');
   assert.match(k8s, /name: my-shop-api/);
   const dir = project({ 'package.json': { scripts: { start: 'x' } } });
-  assert.match(generate(dir, { deploy: 'fly' }).files.find((f) => f.path === 'fly.toml').content, /^app = "shipkit-[a-zA-Z0-9]+"|^app = "shipkit-/m);
+  assert.match(generate(dir, { deploy: 'fly' }).files.find((f) => f.path === 'fly.toml').content, /^app = "dockcrate-[a-zA-Z0-9]+"|^app = "dockcrate-/m);
 });
 
 test('deploy options are validated', () => {
@@ -519,11 +519,11 @@ test('CI service containers: GitHub services + localhost URLs, GitLab services +
 
 test('image scan: Trivy action on GitHub; on GitLab a docker run of Trivy between build and push, any registry', () => {
   const gh = stepsOf({ stack: 'node', scan: true }).ci;
-  assert.match(gh, /aquasecurity\/trivy-action@0\.28\.0/);
+  assert.match(gh, /aquasecurity\/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0\.35\.0/);
   assert.match(gh, /image-ref: "\$\{\{ steps.ref.outputs.image \}\}"/);
   const gl = generate(null, { isNew: true, stack: 'node', ci: 'gitlab', scan: true, deploy: 'kubernetes' }).files.find((f) => f.kind === 'ci').content;
   assert.match(gl, /stages: \[test, build, deploy\]/);
-  assert.match(gl, /docker build [\s\S]*aquasec\/trivy:latest image --exit-code 1 --severity HIGH,CRITICAL[\s\S]*docker push --all-tags/);
+  assert.match(gl, /docker build [\s\S]*aquasec\/trivy:0\.69\.3 image --exit-code 1 --severity HIGH,CRITICAL[\s\S]*docker push --all-tags/);
   assert.match(gl, /needs: \[build-image\]/);
   const cloud = generate(null, { isNew: true, stack: 'node', ci: 'gitlab', scan: true, deploy: 'cloudrun' }).files.find((f) => f.kind === 'ci').content;
   assert.match(cloud, /aquasec\/trivy/);
@@ -595,7 +595,7 @@ test('go: detects go.mod, the cmd/ main package and the go version; static binar
   assert.match(df, /RUN apk add --no-cache curl/);
   assert.match(df, /USER app/);
   assert.match(df, /HEALTHCHECK .* wget -qO \/dev\/null http:\/\/127\.0\.0\.1:8080\/health/);
-  assert.match(file(r, '.github/workflows/ci.yml'), /actions\/setup-go@v5/);
+  assert.match(file(r, '.github/workflows/ci.yml'), /actions\/setup-go@[0-9a-f]{40} # v5/);
   const audit = fresh({ stack: 'go', ciSteps: ['lint', 'audit'] }).files.find((f) => f.kind === 'ci').content;
   assert.match(audit, /run: go vet .\/\.\.\./);
   assert.match(audit, /govulncheck/);
@@ -649,11 +649,11 @@ test('Docker Hub replaces GHCR for registry-based targets, but not cloud targets
 
 test('hadolint, SBOM + provenance and cosign signing on GitHub', () => {
   const ci = stepsOf({ stack: 'node', lintDockerfile: true, sbom: true, sign: true }).ci;
-  assert.match(ci, /lint-dockerfile:\n {4}runs-on: ubuntu-latest[\s\S]*hadolint\/hadolint-action@v3\.1\.0/);
+  assert.match(ci, /lint-dockerfile:\n {4}runs-on: ubuntu-latest[\s\S]*hadolint\/hadolint-action@[0-9a-f]{40} # v3\.1\.0/);
   assert.match(ci, /failure-threshold: "error"/);
   assert.match(ci, /image:\n {4}needs: \[test, lint-dockerfile\]/);
   assert.match(ci, /sbom: "true"\n\s+provenance: "mode=max"/);
-  assert.match(ci, /sigstore\/cosign-installer@v3/);
+  assert.match(ci, /sigstore\/cosign-installer@[0-9a-f]{40} # v3/);
   assert.match(ci, /cosign sign --yes \\"\$IMAGE@\$DIGEST\\"/);
   assert.match(ci, /DIGEST: "\$\{\{ steps.build.outputs.digest \}\}"/);
   assert.match(ci, /image:[\s\S]*permissions:\n {6}contents: read\n {6}packages: write\n {6}id-token: write/);
@@ -730,7 +730,7 @@ test('php: composer.json drives version, extensions and web root; apache runs un
   assert.match(df, /CMD curl -fsS -o \/dev\/null http:\/\/127\.0\.0\.1:8080\/up \|\| exit 1/);
   assert.ok(r.notes.some((n) => /Laravel: set APP_KEY/.test(n)));
   const ci = file(r, '.github/workflows/ci.yml');
-  assert.match(ci, /shivammathur\/setup-php@v2/);
+  assert.match(ci, /shivammathur\/setup-php@[0-9a-f]{40} # v2/);
   assert.match(ci, /run: php artisan test/);
   assert.equal(r.ci.selected.join(), 'test');
   const noRoot = generate(project({ 'composer.json': { require: {} } }));
@@ -791,11 +791,11 @@ test('every registry can be chosen for the registry target, on both providers, w
 test('a cloud registry chosen for a generic target signs in with the matching cloud steps (OIDC included)', () => {
   const gar = fresh({ stack: 'node', registry: 'gar', permissions: ['id-token-write'] });
   const ci = gar.files.find((f) => f.kind === 'ci').content;
-  assert.match(ci, /uses: google-github-actions\/auth@v2[\s\S]*workload_identity_provider/);
+  assert.match(ci, /uses: google-github-actions\/auth@[0-9a-f]{40} # v2[\s\S]*workload_identity_provider/);
   assert.match(ci, /id-token: write/);
   assert.ok(gar.notes.some((n) => /GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT/.test(n)));
-  assert.match(fresh({ stack: 'node', registry: 'ecr' }).files.find((f) => f.kind === 'ci').content, /aws-actions\/configure-aws-credentials@v4[\s\S]*amazon-ecr-login@v2/);
-  assert.match(fresh({ stack: 'node', registry: 'acr' }).files.find((f) => f.kind === 'ci').content, /azure\/login@v2[\s\S]*az acr login/);
+  assert.match(fresh({ stack: 'node', registry: 'ecr' }).files.find((f) => f.kind === 'ci').content, /aws-actions\/configure-aws-credentials@[0-9a-f]{40} # v4[\s\S]*amazon-ecr-login@[0-9a-f]{40} # v2/);
+  assert.match(fresh({ stack: 'node', registry: 'acr' }).files.find((f) => f.kind === 'ci').content, /azure\/login@[0-9a-f]{40} # v2[\s\S]*az acr login/);
 });
 
 test('registry choice: ssh needs a username/token registry; cloud and platform-built targets keep their own', () => {
@@ -832,7 +832,7 @@ test('jenkins: docker agents, credentials for secrets, services on the host netw
   assert.match(j, /timeout\(time: 20, unit: 'MINUTES'\)/);
   assert.match(j, /stage\('Test 20'\)[\s\S]*docker\.image\('node:20'\)\.inside\('--network host'\)/);
   assert.match(j, /stage\('Test 22'\)/);
-  assert.match(j, /docker run -d --name "shipkit-\$BUILD_TAG-postgres" --network host/);
+  assert.match(j, /docker run -d --name "dockcrate-\$BUILD_TAG-postgres" --network host/);
   assert.match(j, /DOCKERHUB_TOKEN = credentials\('DOCKERHUB_TOKEN'\)/);
   assert.match(j, /when \{ beforeAgent true; not \{ changeRequest\(\) \} \}/);
   assert.match(j, /agent \{\n {8}docker \{ image 'docker:27-cli'; label 'linux'/);
@@ -846,7 +846,7 @@ test('bitbucket: reusable steps, triggers become pipeline sections, deploy is on
   assert.match(b, /\n {2}branches:\n {4}"main":\n {6}- parallel:\n {10}- step: \*test-20/);
   assert.match(b, /\n {2}tags:\n {4}"v\*":/);
   assert.match(b, /\n {2}custom:\n {4}manual:/);
-  assert.match(b, /- \|\n {12}cat > \.shipkit-deploy\.sh <<'SHIPKIT_DEPLOY'/);
+  assert.match(b, /- \|\n {12}cat > \.dockcrate-deploy\.sh <<'DOCKCRATE_DEPLOY'/);
   const noPr = ciText({ ci: 'bitbucket', pullRequests: false, tags: [] });
   assert.doesNotMatch(noPr, /pull-requests:|\n {2}tags:/);
 });
@@ -962,4 +962,90 @@ test('edits can disable a whole file and add a new one; paths are validated', ()
   assert.throws(() => fresh({ stack: 'node', edits: { '/etc/passwd': { add: [{ id: 'a', text: 'x' }] } } }), /invalid custom file path/);
   assert.throws(() => fresh({ stack: 'node', edits: { '.git/hooks/pre-commit': { add: [{ id: 'a', text: 'x' }] } } }), /invalid custom file path/);
   assert.throws(() => fresh({ stack: 'node', edits: [] }), /edits must be an object/);
+});
+
+// ---- supply chain: pinned actions, safe Trivy versions
+const everything = (extra = {}) =>
+  generate(null, {
+    isNew: true, stack: 'node', ci: 'github', deploy: 'kubernetes', scan: true, lintDockerfile: true, sbom: true, sign: true,
+    codeScan: true, platforms: ['linux/amd64', 'linux/arm64'], ...extra,
+  }).files.filter((f) => f.kind === 'ci');
+const usesOf = (files) => files.flatMap((f) => [...f.content.matchAll(/^\s*(?:- )?uses: (\S+)(.*)$/gm)].map((m) => ({ ref: m[1], comment: m[2].trim() })));
+
+test('GitHub actions are pinned to full commit SHAs with the tag as a comment, by default', () => {
+  const uses = usesOf(everything());
+  assert.ok(uses.length > 8);
+  for (const { ref, comment } of uses) {
+    assert.match(ref, /@[0-9a-f]{40}$/, `${ref} is not pinned`);
+    assert.match(comment, /^# \S+$/);
+  }
+});
+
+test('--no-pin-actions keeps tags; Gitea never pins (its runners may not resolve SHAs)', () => {
+  const tags = usesOf(everything({ pinActions: false }));
+  assert.ok(tags.every(({ ref }) => /@[\w.]+$/.test(ref) && !/@[0-9a-f]{40}$/.test(ref)));
+  const gitea = usesOf(everything({ ci: 'gitea', sbom: false, sign: false, codeScan: false }));
+  assert.ok(gitea.length > 0 && gitea.every(({ ref }) => !/@[0-9a-f]{40}$/.test(ref)));
+});
+
+test('Trivy is never emitted at a version from the March 2026 compromise (trivy-action 0.0.1-0.34.2, image 0.69.4+, latest)', () => {
+  const text = [
+    ...everything().map((f) => f.content),
+    ...everything({ pinActions: false }).map((f) => f.content),
+    generate(null, { isNew: true, stack: 'node', ci: 'gitlab', scan: true }).files.find((f) => f.kind === 'ci').content,
+    generate(null, { isNew: true, stack: 'node', extras: ['makefile'] }).files.find((f) => f.path === 'Makefile').content,
+  ].join('\n');
+  assert.doesNotMatch(text, /trivy-action@0\.28/);
+  assert.doesNotMatch(text, /aquasec\/trivy(:latest)?\s/);
+  assert.match(text, /trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0\.35\.0/);
+  assert.match(text, /trivy-action@0\.35\.0/);
+  assert.match(text, /aquasec\/trivy:0\.69\.3/);
+});
+
+// ---- Next.js and Kubernetes
+const nextProject = (config = '', public_ = true) =>
+  project({
+    'package.json': { dependencies: { react: '19', next: '16' }, scripts: { build: 'next build', start: 'next start -H 127.0.0.1' } },
+    'package-lock.json': '{}',
+    ...(config && { 'next.config.mjs': config }),
+    ...(public_ && { 'public/robots.txt': '' }),
+  });
+
+test('next.js without standalone runs next start on 0.0.0.0, whatever the start script says', () => {
+  const r = generate(nextProject('export default {};'));
+  const df = file(r, 'Dockerfile');
+  assert.match(df, /CMD \["npx","next","start","-H","0\.0\.0\.0"\]/);
+  assert.match(df, /NEXT_TELEMETRY_DISABLED=1/);
+  assert.ok(r.notes.some((n) => /output: "standalone"/.test(n)));
+});
+
+test('next.js with output standalone ships only the traced server, static files and public/', () => {
+  const r = generate(nextProject("export default { output: 'standalone' };"));
+  const df = file(r, 'Dockerfile');
+  assert.match(df, /COPY --from=build --chown=node:node \/app\/public \.\/public/);
+  assert.match(df, /COPY --from=build --chown=node:node \/app\/\.next\/standalone \.\//);
+  assert.match(df, /COPY --from=build --chown=node:node \/app\/\.next\/static \.\/\.next\/static/);
+  assert.match(df, /ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0\.0\.0\.0/);
+  assert.match(df, /CMD \["node","server\.js"\]/);
+  assert.doesNotMatch(df, /npm start|next start/);
+  assert.doesNotMatch(file(generate(nextProject("export default { output: 'standalone' };", false)), 'Dockerfile'), /app\/public/);
+});
+
+test('kubernetes manifests: hardened containers, optional env Secret, probes follow the health path', () => {
+  const plain = file(fresh({ stack: 'node', name: 'Shop', deploy: 'kubernetes' }), 'k8s/deployment.yaml');
+  assert.match(plain, /allowPrivilegeEscalation: false/);
+  assert.match(plain, /drop: \[ALL\]/);
+  assert.match(plain, /seccompProfile:\n {10}type: RuntimeDefault/);
+  assert.match(plain, /automountServiceAccountToken: false/);
+  assert.match(plain, /envFrom:\n {12}- secretRef:\n {16}name: shop-env\n {16}optional: true/);
+  assert.match(plain, /readinessProbe:\n {12}tcpSocket:/);
+  const http = file(fresh({ stack: 'node', name: 'Shop', deploy: 'kubernetes', healthcheck: '/health' }), 'k8s/deployment.yaml');
+  assert.match(http, /readinessProbe:\n {12}httpGet:\n {14}path: \/health\n {14}port: 3000/);
+  assert.match(http, /livenessProbe:\n {12}httpGet:\n {14}path: \/health/);
+});
+
+test('kubernetes with compose services warns that the services are not deployed', () => {
+  const r = fresh({ stack: 'node', name: 'Shop', deploy: 'kubernetes', db: ['postgres', 'redis'] });
+  assert.ok(r.notes.some((n) => /postgres, redis/.test(n) && /shop-env/.test(n)));
+  assert.ok(!fresh({ stack: 'node', deploy: 'kubernetes' }).notes.some((n) => /compose services/.test(n)));
 });

@@ -208,6 +208,39 @@ export const react = spa('react', {
   starterDir: () => 'dist',
 });
 
+const NEXT_CONFIGS = ['next.config.js', 'next.config.mjs', 'next.config.cjs', 'next.config.ts', 'next.config.mts'];
+const NEXT_STANDALONE = /output\s*:\s*['"`]standalone['"`]/;
+
+/** Next.js with `output: 'standalone'`: ship only the traced server, static assets and public/ (a fraction of the size). */
+function nextStandalone(i, port, c) {
+  return lines(
+    SYNTAX,
+    `FROM node:${i.version}-alpine AS base`,
+    'WORKDIR /app',
+    corepack(i),
+    '',
+    'FROM base AS build',
+    'ENV NEXT_TELEMETRY_DISABLED=1',
+    manifest(i),
+    `RUN ${install(i)}`,
+    'COPY . .',
+    argLines(c),
+    buildStep(i),
+    '',
+    'FROM base AS runtime',
+    `ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=${port} HOSTNAME=0.0.0.0`,
+    envLines(c),
+    apk(c),
+    i.hasPublic && 'COPY --from=build --chown=node:node /app/public ./public',
+    'COPY --from=build --chown=node:node /app/.next/standalone ./',
+    'COPY --from=build --chown=node:node /app/.next/static ./.next/static',
+    'USER node',
+    `EXPOSE ${port}`,
+    healthcheck(c, port, 'wget'),
+    'CMD ["node","server.js"]',
+  );
+}
+
 /** Any Node server (Express, Fastify, Nest, Next.js, ...). Also the fallback for other package.json projects. */
 export const node = {
   id: 'node',
@@ -225,12 +258,22 @@ export const node = {
   ciDefaults: (i) => ciDefaults(i),
   ciNotes: (i, selected) => ciNotes(i, selected, {}),
   ignore: IGNORE,
-  detect: (dir, opts) => inspect(dir, opts),
+  detect(dir, opts) {
+    const i = inspect(dir, opts);
+    if (i && 'next' in i.deps) {
+      i.next = true;
+      i.standalone = NEXT_STANDALONE.test(NEXT_CONFIGS.map((f) => read(dir, f)).join('\n'));
+      i.hasPublic = has(dir, 'public');
+    }
+    return i;
+  },
   starter: (opts) => starter(opts, { build: opts.build !== false, start: true }),
   assumes: (i) => `a "start" script that runs the server${i.scripts.build ? ', a "build" script (TypeScript/Next.js/...)' : ''}`,
   dockerfile(i, port, c) {
+    if (i.standalone) return nextStandalone(i, port, c);
     const main = i.pkg.main ?? 'index.js';
-    const cmd = i.scripts.start ? [i.pm, 'start'] : ['node', main];
+    // `next start` binds to the host given by the project's own script, which is often localhost: unreachable in a container.
+    const cmd = i.next ? ['npx', 'next', 'start', '-H', '0.0.0.0'] : i.scripts.start ? [i.pm, 'start'] : ['node', main];
     return lines(
       SYNTAX,
       `FROM node:${i.version}-alpine AS base`,
@@ -250,7 +293,7 @@ export const node = {
       'RUN rm -rf node_modules',
       '',
       'FROM base AS runtime',
-      `ENV NODE_ENV=production PORT=${port}`,
+      `ENV NODE_ENV=production PORT=${port}${i.next ? ' NEXT_TELEMETRY_DISABLED=1' : ''}`,
       envLines(c),
       apk(c),
       'COPY --from=build --chown=node:node /app ./',
@@ -263,7 +306,11 @@ export const node = {
   },
   ci: (i, v, selected) => ci(i, selected, v),
   notes: (i, port) => [
-    `The app must listen on process.env.PORT (set to ${port}) and on 0.0.0.0, not just localhost.`,
+    i.standalone
+      ? 'Next.js with output: "standalone" detected: the image runs the traced server (node server.js) listening on 0.0.0.0.'
+      : i.next
+        ? 'Next.js detected: the image runs `next start -H 0.0.0.0`. Add output: "standalone" to next.config for a much smaller image (Dockcrate then switches to it).'
+        : `The app must listen on process.env.PORT (set to ${port}) and on 0.0.0.0, not just localhost.`,
     !i.scripts.start && !i.pkg.main && 'No "start" script or "main" in package.json; CMD falls back to node index.js.',
   ],
 };

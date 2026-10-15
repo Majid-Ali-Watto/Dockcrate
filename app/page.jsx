@@ -5,7 +5,7 @@ import { getMeta, guard } from '../src/api.js';
 import { siteOrigin } from '../lib/site.js';
 import pkg from '../package.json' with { type: 'json' };
 
-// Rendered per request: the page embeds the folder `shipkit serve` was started in.
+// Rendered per request: the page embeds the folder `dockcrate serve` was started in.
 export const dynamic = 'force-dynamic';
 
 export default async function Page() {
@@ -18,7 +18,7 @@ export default async function Page() {
   const jsonLd = JSON.stringify({
     '@context': 'https://schema.org',
     '@type': 'SoftwareApplication',
-    name: 'Shipkit',
+    name: 'Dockcrate',
     url: `${origin}/`,
     description: 'Generates Dockerfile, docker-compose, CI/CD pipeline and deployment config for any project.',
     applicationCategory: 'DeveloperApplication',

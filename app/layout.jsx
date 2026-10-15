@@ -3,13 +3,13 @@ import './globals.css';
 import { isHosted } from '../src/api.js';
 import { siteOrigin } from '../lib/site.js';
 
-const title = 'Shipkit · Docker & CI/CD file generator';
+const title = 'Dockcrate · Docker & CI/CD file generator';
 const socialImage = {
   url: '/og-image.png',
   width: 1200,
   height: 630,
   type: 'image/png',
-  alt: 'Shipkit: Dockerfile, Compose, CI/CD and deployment config for any project.',
+  alt: 'Dockcrate: Dockerfile, Compose, CI/CD and deployment config for any project.',
 };
 const LOCAL_DESCRIPTION =
   'Generate a Dockerfile, docker-compose, CI/CD pipeline and deployment config for an existing or a new project. Runs locally; nothing leaves your machine.';
@@ -20,20 +20,20 @@ export async function generateMetadata() {
   const description = isHosted() ? HOSTED_DESCRIPTION : LOCAL_DESCRIPTION;
   return {
     metadataBase: new URL(await siteOrigin()),
-    title: { default: title, template: '%s · Shipkit' },
+    title: { default: title, template: '%s · Dockcrate' },
     description,
-    applicationName: 'Shipkit',
+    applicationName: 'Dockcrate',
     generator: 'Next.js',
     category: 'developer tools',
     keywords: ['Dockerfile generator', 'docker-compose', 'CI/CD', 'GitHub Actions', 'GitLab CI', 'Kubernetes', 'DevOps'],
-    authors: [{ name: 'Shipkit' }],
+    authors: [{ name: 'Dockcrate' }],
     referrer: 'no-referrer',
     alternates: { canonical: '/' },
     robots: { index: true, follow: true, googleBot: { index: true, follow: true, 'max-image-preview': 'large', 'max-snippet': -1 } },
     formatDetection: { telephone: false, email: false, address: false },
-    openGraph: { type: 'website', siteName: 'Shipkit', locale: 'en_US', url: '/', title, description, images: [socialImage] },
+    openGraph: { type: 'website', siteName: 'Dockcrate', locale: 'en_US', url: '/', title, description, images: [socialImage] },
     twitter: { card: 'summary_large_image', title, description, images: [socialImage] },
-    appleWebApp: { capable: true, title: 'Shipkit', statusBarStyle: 'default' },
+    appleWebApp: { capable: true, title: 'Dockcrate', statusBarStyle: 'default' },
     icons: {
       // favicon.ico is added from app/favicon.ico
       icon: [
@@ -59,7 +59,7 @@ export const viewport = {
 };
 
 // Runs before first paint so a saved theme does not flash the OS one.
-const THEME_SCRIPT = `try{var t=localStorage.getItem('shipkit-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}`;
+const THEME_SCRIPT = `try{var t=localStorage.getItem('dockcrate-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}`;
 
 export default async function RootLayout({ children }) {
   const nonce = (await headers()).get('x-nonce') ?? undefined; // set by proxy.js; the CSP only runs scripts that carry it

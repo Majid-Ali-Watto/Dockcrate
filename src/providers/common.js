@@ -98,7 +98,7 @@ export function shellPlan(p, ciSteps, vars, { alpine = true } = {}) {
     p.imageTags.includes('latest') && `if ${vars.defaultBranchTest}; then docker tag "$IMAGE_REPO:${sha}" "$IMAGE_REPO:latest"; fi`,
     p.imageTags.includes('semver') && `if [ -n "$${vars.tag}" ]; then docker tag "$IMAGE_REPO:${sha}" "$IMAGE_REPO:\${${vars.tag}#v}"; fi`,
   ].filter(Boolean);
-  const scan = `docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 1 --severity ${p.scanSeverity.join(',')} --ignore-unfixed "$IMAGE_REPO:${sha}"`;
+  const scan = `docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.69.3 image --exit-code 1 --severity ${p.scanSeverity.join(',')} --ignore-unfixed "$IMAGE_REPO:${sha}"`;
 
   const target = p.target;
   const needNames = [...(p.targetNeeds.secrets ?? []), ...(p.targetNeeds.vars ?? [])].map((n) => n.replace(/\?$/, ''));
@@ -138,10 +138,10 @@ export function dockerRunDeploy(d) {
   const image = typeof d.image === 'string' ? d.image : d.image.name;
   const passed = [...Object.entries(d.env).map(([k, v]) => `-e "${k}=${v}"`), ...d.pass.map((n) => `-e ${n}`)];
   return [
-    "cat > .shipkit-deploy.sh <<'SHIPKIT_DEPLOY'",
+    "cat > .dockcrate-deploy.sh <<'DOCKCRATE_DEPLOY'",
     ...d.setup,
     ...d.script,
-    'SHIPKIT_DEPLOY',
-    `docker run --rm ${passed.join(' ')} -v "$PWD:/work" -w /work --entrypoint sh ${image} .shipkit-deploy.sh`,
+    'DOCKCRATE_DEPLOY',
+    `docker run --rm ${passed.join(' ')} -v "$PWD:/work" -w /work --entrypoint sh ${image} .dockcrate-deploy.sh`,
   ];
 }

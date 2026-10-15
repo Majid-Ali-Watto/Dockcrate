@@ -7,7 +7,7 @@ import { HttpError, apiRoute, getMeta, guard, handleBrowse, handleGenerate } fro
 
 const scratch = (prefix) => mkdtempSync(join(tmpdir(), prefix));
 const node = () => {
-  const dir = scratch('shipkit-api-');
+  const dir = scratch('dockcrate-api-');
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { start: 'node .' } }));
   return dir;
 };
@@ -38,7 +38,7 @@ test('meta describes stacks, targets and the option vocabularies', () => {
   assert.ok(meta.targets.some((t) => t.id === 'kubernetes' && t.files));
   assert.deepEqual(meta.pipeline.deployOn, ['branch', 'tag', 'manual']);
   assert.ok(meta.dbs.includes('rabbitmq'));
-  assert.equal(meta.cwd, process.env.SHIPKIT_CWD ?? process.cwd());
+  assert.equal(meta.cwd, process.env.DOCKCRATE_CWD ?? process.cwd());
 });
 
 test('preview generates without writing; blank form fields are ignored', () => {
@@ -67,7 +67,7 @@ test('write creates files, then skips them unless forced', () => {
 });
 
 test('browse lists subfolders with detected stacks, hiding dotfolders and node_modules', () => {
-  const root = scratch('shipkit-browse-');
+  const root = scratch('dockcrate-browse-');
   for (const d of ['zeta', 'app', '.hidden', 'node_modules']) mkdirSync(join(root, d));
   writeFileSync(join(root, 'app', 'package.json'), JSON.stringify({ dependencies: { vue: '3' } }));
   writeFileSync(join(root, 'file.txt'), '');
@@ -87,7 +87,7 @@ test('new project: preview needs no folder; write needs one and creates it', () 
   assert.match(data.files[0].content, /uv sync/);
 
   assert.equal(code(() => handleGenerate({ mode: 'new', stack: 'fastapi', write: true })), 400);
-  const target = join(scratch('shipkit-new-'), 'brand', 'new');
+  const target = join(scratch('dockcrate-new-'), 'brand', 'new');
   assert.ok(handleGenerate({ mode: 'new', stack: 'node', dir: target, write: true }).written.every((w) => w.status === 'written'));
   assert.ok(existsSync(join(target, 'Dockerfile')));
 
@@ -208,11 +208,11 @@ test('written files are exactly the previewed ones', () => {
 
 // ---- hosted mode (Vercel): nothing may touch the server's disk
 const hosted = async (fn) => {
-  process.env.SHIPKIT_HOSTED = '1';
+  process.env.DOCKCRATE_HOSTED = '1';
   try {
     return await fn();
   } finally {
-    delete process.env.SHIPKIT_HOSTED;
+    delete process.env.DOCKCRATE_HOSTED;
   }
 };
 
@@ -226,9 +226,9 @@ test('hosted: meta exposes no server paths and says it is hosted', () =>
 
 test('hosted: any Host is accepted, a foreign Origin is still refused', () =>
   hosted(() => {
-    guard(new Headers({ host: 'shipkit.vercel.app' }));
-    guard(new Headers({ host: 'shipkit.vercel.app', origin: 'https://shipkit.vercel.app' }));
-    assert.equal(code(() => guard(new Headers({ host: 'shipkit.vercel.app', origin: 'https://evil.example' }))), 403);
+    guard(new Headers({ host: 'dockcrate.vercel.app' }));
+    guard(new Headers({ host: 'dockcrate.vercel.app', origin: 'https://dockcrate.vercel.app' }));
+    assert.equal(code(() => guard(new Headers({ host: 'dockcrate.vercel.app', origin: 'https://evil.example' }))), 403);
   }));
 
 test('hosted: browsing, existing projects and writing are refused; new projects generate without a folder', () =>
@@ -236,7 +236,7 @@ test('hosted: browsing, existing projects and writing are refused; new projects 
     assert.equal(code(() => handleBrowse({ dir: '/' })), 404);
     assert.equal(code(() => handleGenerate({ dir: node() })), 400);
     assert.equal(code(() => handleGenerate({ mode: 'new', stack: 'node', dir: '/tmp', write: true })), 400);
-    const target = join(scratch('shipkit-hosted-'), 'never');
+    const target = join(scratch('dockcrate-hosted-'), 'never');
     const data = handleGenerate({ mode: 'new', stack: 'node', dir: target });
     assert.equal(data.dir, null);
     assert.ok(data.files.some((f) => f.path === 'Dockerfile' && f.existing === null));
@@ -245,5 +245,5 @@ test('hosted: browsing, existing projects and writing are refused; new projects 
 
 test('local mode is unchanged when the hosted flag is off', () => {
   assert.equal(getMeta().hosted, false);
-  assert.equal(code(() => guard(new Headers({ host: 'shipkit.vercel.app' }))), 403);
+  assert.equal(code(() => guard(new Headers({ host: 'dockcrate.vercel.app' }))), 403);
 });

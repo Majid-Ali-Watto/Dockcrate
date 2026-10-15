@@ -105,7 +105,7 @@ export default function App({ meta: serverMeta }) {
           <div className="brand-top">
             <h1 className="logo">
               <img src="/logo.svg" alt="" width="28" height="28" />
-              Shipkit
+              Dockcrate
             </h1>
             <ThemeToggle />
           </div>

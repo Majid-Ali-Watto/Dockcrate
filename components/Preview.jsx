@@ -187,7 +187,7 @@ export default function Preview({ result, error, loading, isNew, hosted = false,
               </button>
             )}
             {files.length > 1 && (
-              <button type="button" onClick={async () => download('shipkit-files.zip', (await import('../lib/zip.js')).zip(files))}>
+              <button type="button" onClick={async () => download('dockcrate-files.zip', (await import('../lib/zip.js')).zip(files))}>
                 Download all (.zip)
               </button>
             )}

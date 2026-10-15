@@ -1,19 +1,19 @@
-# Shipkit
+# Dockcrate
 
 Generates the Dockerfile, `.dockerignore`, `docker-compose.yml`, CI/CD pipeline and deployment config for a project you already have, or for one you haven't started. Two front ends share one generator: a **CLI** and a **Next.js web UI**.
 
 ```sh
 npm install                   # once (the CLI itself needs nothing; the web UI needs Next)
-npm link                      # puts `shipkit` on your PATH (or: node bin/shipkit.js ...)
+npm link                      # puts `dockcrate` on your PATH (or: node bin/dockcrate.js ...)
 
-shipkit ~/code/my-app             # detect the stack and write the files
-shipkit --new --stack react --tool pnpm ./shop      # a project that doesn't exist yet
-shipkit serve                     # web UI at http://localhost:4173
+dockcrate ~/code/my-app             # detect the stack and write the files
+dockcrate --new --stack react --tool pnpm ./shop      # a project that doesn't exist yet
+dockcrate serve                     # web UI at http://localhost:4173
 ```
 
 ## Web UI
 
-`shipkit serve` runs the Next.js app (`next start`, bound to 127.0.0.1). It rebuilds itself first when the sources are newer than the build. `npm run dev` runs it in development mode.
+`dockcrate serve` runs the Next.js app (`next start`, bound to 127.0.0.1). It rebuilds itself first when the sources are newer than the build. `npm run dev` runs it in development mode.
 
 The UI fills the window: controls on the left (scrolling on their own), a live preview on the right. Controls appear only when they apply: a static site has no database or OS-package options, FastAPI has no build-folder field, GitLab hides GitHub-only settings, unticking the CI file group hides CI, deployment and trigger options, and a file that doesn't exist yet is shown full width with no empty "Existing" pane.
 
@@ -28,7 +28,7 @@ The API is Next route handlers (`app/api/*`) over `src/api.js`. It only answers 
 
 | Area | Options |
 | --- | --- |
-| Stack | node (Express/Nest/Next…), react, vue, angular, fastapi, django, .NET, Java, Go, Rust, PHP (Laravel/Symfony/plain Composer), Ruby (Rails/Rack); tool: npm/yarn/pnpm, pip/uv/poetry, maven/gradle; runtime, port, name, build folder |
+| Stack | node (Express/Nest, …), Next.js (standalone output detected), react, vue, angular, fastapi, django, .NET, Java, Go, Rust, PHP (Laravel/Symfony/plain Composer), Ruby (Rails/Rack); tool: npm/yarn/pnpm, pip/uv/poetry, maven/gradle; runtime, port, name, build folder |
 | Files | Dockerfile (+`nginx.conf`), `.dockerignore`, compose (+`.env.example`), CI pipeline, deployment config; opt-in extras: Dependabot (Renovate off GitHub), dev container, Makefile, `.editorconfig` |
 | Container | healthcheck path, OS packages (apk/apt), runtime env vars, build args (Node and static sites: `VITE_*`, `NEXT_PUBLIC_*`) |
 | Compose services | postgres, mysql, mariadb, mongo, redis, memcached, elasticsearch, rabbitmq, mailpit (health-gated `depends_on`, volumes, URLs) |
@@ -47,7 +47,7 @@ The API is Next route handlers (`app/api/*`) over `src/api.js`. It only answers 
 | --- | --- | --- | --- |
 | `registry` (default) | GHCR / GitLab registry | none | build and push only |
 | `ssh` | GHCR / GitLab registry | `image:` added to compose | scp the compose file, `docker compose pull && up -d`; pin host keys with `SSH_KNOWN_HOSTS` |
-| `kubernetes` | GHCR / GitLab registry | `k8s/deployment.yaml`, `k8s/service.yaml` | kubeconfig in `KUBE_CONFIG`; rollout is awaited |
+| `kubernetes` | GHCR / GitLab registry | `k8s/deployment.yaml`, `k8s/service.yaml` | kubeconfig in `KUBE_CONFIG`; rollout is awaited; seccomp, no privilege escalation, all capabilities dropped, no service-account token; probes use the health path when set; optional `<app>-env` Secret for `DATABASE_URL` and friends |
 | `cloudrun` | Artifact Registry | none | `gcloud run deploy` |
 | `ecs` | ECR | `ecs/task-definition.json` | registers a task definition revision, waits for stability |
 | `azure` | ACR | none | Web App for Containers |
@@ -63,22 +63,24 @@ Each run lists exactly which secrets and variables to create. Ticking `id-token:
 
 Import the repo in Vercel; the Next.js preset needs no settings (Node 20.9 or newer). Nothing is required, and `SITE_URL` is optional (see `.env.example`).
 
-A server you don't own has no project folders, so the hosted site runs in **hosted mode** (switched on by Vercel's `VERCEL` variable, or by `SHIPKIT_HOSTED=1` on another host):
+A server you don't own has no project folders, so the hosted site runs in **hosted mode** (switched on by Vercel's `VERCEL` variable, or by `DOCKCRATE_HOSTED=1` on another host):
 
 - only **New project** is offered: pick a stack and options, then copy, download (.zip) or edit the files;
 - folder browsing, reading an existing project and writing to a folder are refused by the API (and hidden in the UI), and no server path is ever sent to the browser;
 - cross-site requests are still rejected; the page, `robots.txt`, `sitemap.xml`, canonical and Open Graph URLs use `SITE_URL`, else the production domain, else the request's own host (preview deployments are noindexed by Vercel);
-- for an existing project, or to write into a folder, run Shipkit locally (`shipkit serve` or the CLI).
+- for an existing project, or to write into a folder, run Dockcrate locally (`dockcrate serve` or the CLI).
 
 ## CLI
 
-`shipkit [dir] [options]` — run `shipkit --help` for the full list. Everything in the table above has a flag, for example:
+`dockcrate [dir] [options]` — run `dockcrate --help` for the full list. Everything in the table above has a flag, for example:
 
 ```sh
-shipkit --new --stack fastapi --tool uv --deploy cloudrun --permissions id-token-write \
+dockcrate --new --stack fastapi --tool uv --deploy cloudrun --permissions id-token-write \
     --ci-steps lint,test,audit --ci-services postgres --scan \
     --healthcheck /health --packages libpq5 --env LOG_LEVEL=info --test-versions 3.12,3.13
 ```
+
+Supply chain: GitHub workflows reference every action by full commit SHA with the tag as a comment (`--no-pin-actions` for plain tags; Gitea never pins; `npm run pins` re-resolves the SHAs, and the Dependabot extra keeps them current). Trivy is only ever emitted at versions outside the March 2026 compromise (trivy-action 0.35.0, image 0.69.3). Next.js apps get a dedicated image: with `output: 'standalone'` in `next.config.*` the runtime stage ships only the traced server, `.next/static` and `public/`; without it the image runs `next start -H 0.0.0.0`, because the usual `-H 127.0.0.1` start script would make the container unreachable.
 
 Supply-chain and extras flags: `--registry dockerhub`, `--lint-dockerfile`, `--sbom`, `--sign`, `--code-scan`, `--extras dependabot,devcontainer,makefile,editorconfig`. SBOM and signing are GitHub-only; CodeQL covers node, python, java, .NET, go, rust and ruby (not PHP).
 
@@ -89,7 +91,7 @@ Nothing is switched on or off behind your back: a setting that cannot work (for 
 ## Layout
 
 ```
-bin/shipkit.js      CLI; `serve` launches Next
+bin/dockcrate.js      CLI; `serve` launches Next
 src/                the generator (plain ESM, no dependencies)
   generate.js       detect/validate/assemble          stacks/   per-stack detection, Dockerfile, CI steps
   ci.js             GitHub Actions + GitLab CI        deploy.js registries and deploy targets

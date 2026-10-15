@@ -1,10 +1,10 @@
 {
-  "name": "shipkit",
+  "name": "dockcrate",
   "version": "0.1.0",
   "description": "Generate Dockerfile, compose and CI/CD files for an existing or a new project (CLI + Next.js UI)",
   "type": "module",
   "bin": {
-    "shipkit": "bin/shipkit.js"
+    "dockcrate": "bin/dockcrate.js"
   },
   "engines": {
     "node": ">=20.9"
@@ -14,7 +14,8 @@
     "build": "next build",
     "start": "next start -H 127.0.0.1",
     "test": "node --test",
-    "icons": "node scripts/build-icons.mjs"
+    "icons": "node scripts/build-icons.mjs",
+    "pins": "node scripts/update-pins.mjs"
   },
   "license": "MIT",
   "dependencies": {

@@ -2,6 +2,7 @@ import { block, mapLines, q, scalar, uniqueKeys, stepTitle, when, withoutDepCach
 import { healthCmd, serviceEnv, serviceUrl } from './common.js';
 import { DBS } from '../compose.js';
 import { REGISTRIES } from '../deploy.js';
+import { pinAction } from './pins.js';
 
 const NOT_PR = "github.event_name != 'pull_request'";
 
@@ -11,11 +12,11 @@ const runLines = (run) => {
 };
 
 /** One step as YAML list-item lines. `key` and `title` only name the block; they are not part of the YAML. */
-function stepLines({ id, if: cond, uses, with: params, run, env }) {
+function stepLines({ id, if: cond, uses, with: params, run, env }, pin) {
   const fields = [
     id && `id: ${id}`,
     cond && `if: ${q(cond)}`,
-    uses && `uses: ${uses}`,
+    uses && `uses: ${pin(uses)}`,
     run && runLines(run),
     params && ['with:', mapLines(params, '  ')],
     env && ['env:', mapLines(env, '  ')],
@@ -25,12 +26,15 @@ function stepLines({ id, if: cond, uses, with: params, run, env }) {
   return fields.map((line, i) => `${i ? '        ' : '      - '}${line}`);
 }
 
-/** Step blocks for a job; ids come from what each step does (`image.build-push-action`). */
-const stepBlocks = (job, steps) => {
+/** Step blocks for a job; ids come from what each step does (`image.build-push-action`). `pin` rewrites `uses` values. */
+const renderSteps = (pin, job, steps) => {
   const list = steps.filter(Boolean);
   const keys = uniqueKeys(list);
-  return list.map((s, i) => block(`${job}.${keys[i]}`, `${job}: ${s.title ?? stepTitle(s)}`, stepLines(s), false));
+  return list.map((s, i) => block(`${job}.${keys[i]}`, `${job}: ${s.title ?? stepTitle(s)}`, stepLines(s, pin), false));
 };
+
+/** Actions are referenced by full commit SHA (with the tag as a comment) unless the user turned pinning off. */
+const stepper = (p) => (job, steps) => renderSteps(p.pinActions ? pinAction : (uses) => uses, job, steps);
 
 const permissionLines = (perms, pad = '') => [`${pad}permissions:`, ...Object.entries(perms).map(([k, v]) => `${pad}  ${k}: ${v}`)];
 
@@ -79,6 +83,7 @@ const IMAGE_TAGS = {
 };
 
 function render(p, ciSteps) {
+  const stepBlocks = stepper(p);
   const { triggers: t, target, appName } = p;
   const registry = p.registryId ? REGISTRIES[p.registryId].github : null;
   const deploys = Boolean(target.script);
@@ -222,7 +227,7 @@ function render(p, ciSteps) {
         p.scan && {
           key: 'trivy',
           if: NOT_PR,
-          uses: 'aquasecurity/trivy-action@0.28.0',
+          uses: 'aquasecurity/trivy-action@0.35.0',
           with: { 'image-ref': x('steps.ref.outputs.image'), severity: p.scanSeverity.join(','), 'ignore-unfixed': 'true', 'exit-code': '1' },
         },
       ]),
@@ -270,6 +275,7 @@ function render(p, ciSteps) {
 
 /** CodeQL gets its own workflow file. */
 function codeqlFiles(p, stack) {
+  const stepBlocks = stepper(p);
   if (!p.codeScan || !stack.codeql) return [];
   const t = p.triggers;
   return [
@@ -305,7 +311,7 @@ export const github = {
   builtinRegistry: true,
   secretsLocation: 'GitHub (Settings > Secrets and variables > Actions)',
   variablesName: 'GitHub repository variables',
-  features: [...COMMON, 'release', 'sbom', 'sign', 'codeScan'],
+  features: [...COMMON, 'release', 'sbom', 'sign', 'codeScan', 'pinActions'],
   render,
   extraFiles: codeqlFiles,
 };

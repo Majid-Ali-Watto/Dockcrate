@@ -1,8 +1,8 @@
 export default function manifest() {
   return {
     id: '/',
-    name: 'Shipkit · Docker & CI/CD file generator',
-    short_name: 'Shipkit',
+    name: 'Dockcrate · Docker & CI/CD file generator',
+    short_name: 'Dockcrate',
     description: 'Generate Dockerfile, compose, CI/CD and deployment files for any project.',
     start_url: '/',
     scope: '/',

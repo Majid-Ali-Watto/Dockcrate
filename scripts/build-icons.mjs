@@ -31,7 +31,7 @@ font-family:system-ui,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;displa
 .row{display:flex;align-items:center;gap:36px}h1{font-size:112px;margin:0;letter-spacing:-2px}
 p{font-size:42px;line-height:1.3;margin:34px 0 0;color:#a5b4c8;max-width:900px}
 .chips{display:flex;gap:14px;margin-top:44px}.chips span{border:2px solid #334155;border-radius:99px;padding:8px 22px;font-size:28px;color:#cbd5e1}
-</style><div class="row">${svg(`${GRADIENT}<rect width="64" height="64" rx="14" fill="url(#g)"/><g fill="#fff">${GLYPH}</g>`, 150)}<h1>Shipkit</h1></div>
+</style><div class="row">${svg(`${GRADIENT}<rect width="64" height="64" rx="14" fill="url(#g)"/><g fill="#fff">${GLYPH}</g>`, 150)}<h1>Dockcrate</h1></div>
 <p>Dockerfile, Compose, CI/CD and deployment config for any project.</p>
 <div class="chips"><span>Docker</span><span>GitHub Actions</span><span>GitLab CI</span><span>Kubernetes</span><span>Cloud Run</span></div>`;
 
@@ -40,7 +40,7 @@ const chrome =
   ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'].find((c) => spawnSync(c, ['--version']).status === 0);
 if (!chrome) throw new Error('Chrome or Chromium is needed to render the icons: set CHROME_PATH');
 
-const work = mkdtempSync(join(tmpdir(), 'shipkit-icons-'));
+const work = mkdtempSync(join(tmpdir(), 'dockcrate-icons-'));
 const file = (...parts) => join(ROOT, ...parts);
 const put = (path, data) => (mkdirSync(join(path, '..'), { recursive: true }), writeFileSync(path, data));
 

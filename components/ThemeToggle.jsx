@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
-const KEY = 'shipkit-theme'; // also read by the inline script in app/layout.jsx before first paint
+const KEY = 'dockcrate-theme'; // also read by the inline script in app/layout.jsx before first paint
 
 // "system" has no data-theme attribute, so the OS preference decides (see globals.css).
 function apply(theme) {

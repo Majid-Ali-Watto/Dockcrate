@@ -220,6 +220,7 @@ export function buildPipeline(opts, { appName, port, composeFile, buildArgs = []
     failFast: Boolean(opts.failFast ?? false),
     pipelineEnv,
     imageTags,
+    pinActions: provider.features.includes('pinActions') && opts.pinActions !== false, // GitHub only; Gitea runners may not resolve SHAs
     depCache: opts.depCache !== false,
     layerCache: opts.layerCache !== false,
     scanSeverity,

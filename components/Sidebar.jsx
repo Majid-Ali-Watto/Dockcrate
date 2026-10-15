@@ -368,6 +368,11 @@ export default function Sidebar({ form, set, meta, show, result, onBrowse }) {
                   Cache dependencies
                 </Check>
               )}
+              {show.can('pinActions') && (
+                <Check checked={form.pinActions} onChange={(v) => set('pinActions', v)}>
+                  Pin actions to commit SHAs <span className="hint">(recommended; a tag can be moved after the fact)</span>
+                </Check>
+              )}
             </div>
             {show.can('permissions') && (
               <MultiField

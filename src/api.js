@@ -30,10 +30,10 @@ const MAX_PREVIEW = 256 * 1024;
 const MAX_FOLDERS = 500;
 
 /**
- * Hosted mode (Vercel, or SHIPKIT_HOSTED=1): the server is someone else's machine, so nothing may touch its disk.
+ * Hosted mode (Vercel, or DOCKCRATE_HOSTED=1): the server is someone else's machine, so nothing may touch its disk.
  * Only "new project" generation is served; browsing, existing folders and writing are refused.
  */
-export const isHosted = () => Boolean(process.env.VERCEL) || process.env.SHIPKIT_HOSTED === '1';
+export const isHosted = () => Boolean(process.env.VERCEL) || process.env.DOCKCRATE_HOSTED === '1';
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -128,7 +128,7 @@ function existingContent(dir, path) {
   }
 }
 
-/** Everything the UI needs to render its controls. `cwd` is where `shipkit serve` was started. */
+/** Everything the UI needs to render its controls. `cwd` is where `dockcrate serve` was started. */
 export function getMeta() {
   return {
     stacks: stackInfo(),
@@ -141,7 +141,7 @@ export function getMeta() {
     providers: providerInfo(),
     pipeline: { permissions: PERMISSIONS, testOs: TEST_OS, platforms: PLATFORMS, concurrency: CONCURRENCY, deployOn: DEPLOY_ON, registry: REGISTRY_CHOICES, imageTags: IMAGE_TAGS, severities: SEVERITIES },
     hosted: isHosted(),
-    cwd: isHosted() ? '' : (process.env.SHIPKIT_CWD ?? process.cwd()),
+    cwd: isHosted() ? '' : (process.env.DOCKCRATE_CWD ?? process.cwd()),
     home: isHosted() ? '' : homedir(),
   };
 }
@@ -173,14 +173,14 @@ const LIST_OPTIONS = [
   'branchesIgnore', 'tags', 'tagsIgnore', 'prBranches', 'paths', 'pathsIgnore',
 ];
 const FLAG_OPTIONS = [
-  'pullRequests', 'manual', 'release', 'scan', 'lintDockerfile', 'sbom', 'sign', 'codeScan', 'depCache', 'layerCache', 'failFast', 'testJob',
+  'pullRequests', 'manual', 'release', 'scan', 'lintDockerfile', 'sbom', 'sign', 'codeScan', 'depCache', 'layerCache', 'pinActions', 'failFast', 'testJob',
 ];
 
 /** Preview (or, with `write: true`, write) the files for the options in `body`. */
 export function handleGenerate(body) {
   const hosted = isHosted();
   if (hosted && (body.mode !== 'new' || body.write === true)) {
-    throw new HttpError(400, 'the hosted site generates files for a new project to copy or download; run Shipkit locally to read or write a folder');
+    throw new HttpError(400, 'the hosted site generates files for a new project to copy or download; run Dockcrate locally to read or write a folder');
   }
   const isNew = body.mode === 'new';
   const dir = hosted ? null : isNew ? targetDir(body.dir) : projectDir(body.dir);

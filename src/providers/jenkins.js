@@ -37,7 +37,7 @@ function render(p, ciSteps) {
     versions.forEach((v) => {
       const tp = shellPlan({ ...p, versions: [] }, () => ciSteps(v ?? undefined), vars);
       const env = Object.fromEntries(p.services.map((n) => serviceUrl(n, 'localhost')));
-      const cname = (n) => `shipkit-$BUILD_TAG-${n}`;
+      const cname = (n) => `dockcrate-$BUILD_TAG-${n}`;
       const start = p.services.flatMap((n) => {
         const db = DBS[n];
         const envs = Object.entries(serviceEnv(n)).map(([k, val]) => `-e "${k}=${val}"`).join(' ');
