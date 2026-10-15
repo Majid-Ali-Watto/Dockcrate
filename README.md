@@ -190,7 +190,7 @@ Vercel has no "deploy this image" flag, so the deploy step is a `Dockerfile.verc
 
 - GitHub variables `VERCEL_TEAM_ID`, `VERCEL_TEAM_SLUG`, `VERCEL_PROJECT_ID`, `VERCEL_PROJECT_NAME`, and the secret `VERCEL_TOKEN`; a GitHub environment named `production`;
 - on the Vercel team, a VCR OIDC policy with read-write access to the project (the push logs in with GitHub OIDC, no stored key);
-- on the Vercel project, the framework preset "Other"; `SITE_URL` is optional (see `.env.example`).
+- on the Vercel project, the Framework Preset "Container" (with "Other" the deployment is Ready but serves a 404); `SITE_URL` is optional (see `.env.example`).
 
 The image sets `DOCKCRATE_HOSTED=1` itself (a container may not get Vercel's `VERCEL` variable). `docker run -p 3000:3000` works anywhere else.
 

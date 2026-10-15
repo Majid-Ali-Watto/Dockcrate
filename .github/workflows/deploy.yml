@@ -8,7 +8,7 @@ name: CI/CD
 #   variables: VERCEL_TEAM_ID (team_...), VERCEL_TEAM_SLUG, VERCEL_PROJECT_ID (prj_...), VERCEL_PROJECT_NAME
 #   secret:    VERCEL_TOKEN (Account Tokens page)
 # On the Vercel team, a VCR OIDC policy with read-write access to the project lets the push below log in without a stored key.
-# The Vercel project's framework preset must be "Other", and its environment needs PORT=80 or whatever the image listens on.
+# The Vercel project's Framework Preset must be "Container" (Settings > Build and Deployment); "Other" ships a deployment with no container and 404s.
 
 on:
   push:
@@ -87,12 +87,18 @@ jobs:
       # Vercel has no "deploy this image" flag: a deployment is built from a Dockerfile.vercel, so the deployed
       # project is just that file pointing at the image tested and pushed above. No source code is uploaded.
       # Vercel does the build (a local `vercel build --prebuilt` produces no container, so the site would 404);
-      # its build pulls the image from VCR with the project's own credentials.
+      # its build pulls the image from VCR with the project's own credentials. The service and rewrite in vercel.json
+      # are what route traffic to the container; without them the deployment is Ready but every path is a 404.
       # USER root and PORT=80 because Vercel sends traffic to port 80 unless the project sets PORT.
       - name: Deploy the image
         run: |
           mkdir deploy
-          printf '%s\n' '{"framework":null}' > deploy/vercel.json
+          cat > deploy/vercel.json <<'JSON'
+          {
+            "services": { "app": { "root": ".", "entrypoint": "Dockerfile.vercel", "runtime": "container" } },
+            "rewrites": [{ "source": "/(.*)", "destination": { "service": "app" } }]
+          }
+          JSON
           printf 'FROM %s\nUSER root\nENV PORT=80\n' "$IMAGE" > deploy/Dockerfile.vercel
           cd deploy
           npx --yes vercel@59.26.0 deploy --prod --token "$VERCEL_TOKEN"
