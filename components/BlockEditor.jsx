@@ -1,19 +1,28 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { useUndo } from './Undo.jsx';
 
 // Every generated file is a list of blocks. Each can be rewritten, switched off, reset, or followed by a block of your own.
 // `edit` is this file's entry in the form's `edits`; `change(updater)` replaces it.
 
 const newId = () => `custom-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
 
-function BlockText({ block, onText }) {
+/** The text of one block. `handle` gets `{ focus(), reset(text) }` so a button that goes away can hand the focus here. */
+function BlockText({ block, onText, handle }) {
   const ref = useRef(null);
   const [text, setText] = useState(block.text);
   // Follow the server's text, but never while you are typing in this box.
   useEffect(() => {
     if (document.activeElement !== ref.current) setText(block.text);
   }, [block.text]);
+  useImperativeHandle(handle, () => ({
+    focus: () => ref.current?.focus(),
+    reset: (next) => {
+      setText(next);
+      ref.current?.focus();
+    },
+  }));
   return (
     <textarea
       ref={ref}
@@ -31,7 +40,14 @@ function BlockText({ block, onText }) {
 }
 
 export default function BlockEditor({ file, edit = {}, change }) {
+  const offerUndo = useUndo();
+  const texts = useRef(new Map());
+  const topButton = useRef(null);
   const blocks = file.blocks ?? [];
+  const handleFor = (id) => (api) => {
+    if (api) texts.current.set(id, api);
+    else texts.current.delete(id);
+  };
   const patchBlock = (block, patch) =>
     change((cur) => {
       const next = { ...cur, blocks: { ...(cur.blocks ?? {}) }, add: [...(cur.add ?? [])] };
@@ -47,9 +63,33 @@ export default function BlockEditor({ file, edit = {}, change }) {
       return next;
     });
   const setText = (block, text) => patchBlock(block, block.custom ? { text } : { text, from: block.base });
-  const addAfter = (after) => change((cur) => ({ ...cur, add: [...(cur.add ?? []), { id: newId(), after, title: 'Custom block', text: '' }] }));
-  const remove = (block) => change((cur) => ({ ...cur, add: (cur.add ?? []).filter((a) => a.id !== block.id) }));
-  const resetAll = () => change(() => null);
+  // Back to the generated text; the button that did it disappears, so the focus goes to the block's text.
+  const reset = (block) => {
+    patchBlock(block, { text: block.base });
+    texts.current.get(block.id)?.reset(block.base);
+  };
+  const addAfter = (after) => {
+    const id = newId();
+    change((cur) => ({ ...cur, add: [...(cur.add ?? []), { id, after, title: 'Custom block', text: '' }] }));
+  };
+  const remove = (block) => {
+    // The next block's text gets the focus (or the previous one's, or the top of the editor).
+    const at = blocks.findIndex((b) => b.id === block.id);
+    const neighbour = blocks[at + 1] ?? blocks[at - 1];
+    change((cur) => ({ ...cur, add: (cur.add ?? []).filter((a) => a.id !== block.id) }));
+    if (neighbour && neighbour.id !== block.id) texts.current.get(neighbour.id)?.focus();
+    else topButton.current?.focus();
+  };
+  const resetAll = () => {
+    const before = edit;
+    change(() => null);
+    offerUndo({
+      message: `Every edit of ${file.path} was reset.`,
+      undo: () => change(() => before),
+      focusAfter: () => topButton.current?.focus(),
+      focusRestored: () => topButton.current?.focus(),
+    });
+  };
 
   const edited = Object.keys(edit.blocks ?? {}).length + (edit.add ?? []).length > 0;
   return (
@@ -59,7 +99,7 @@ export default function BlockEditor({ file, edit = {}, change }) {
           <input type="checkbox" checked={!edit.disabled} onChange={(e) => change((cur) => ({ ...cur, disabled: !e.target.checked }))} />
           <span>Generate this file</span>
         </label>
-        <button type="button" onClick={() => addAfter('')}>
+        <button type="button" ref={topButton} onClick={() => addAfter('')}>
           + Block at top
         </button>
         {edited && (
@@ -76,17 +116,19 @@ export default function BlockEditor({ file, edit = {}, change }) {
               <strong>{b.title}</strong>
             </label>
             <code className="muted">{b.id}</code>
+            {b.disabled && <span className="tag same">off</span>}
             {b.edited && <span className="tag edited">edited</span>}
             {b.custom && <span className="tag new">yours</span>}
             {b.stale && <span className="tag differs" title="The generated text changed since you edited this block">outdated</span>}
             <span className="push" />
-            {b.edited && !b.custom && (
-              <button type="button" onClick={() => patchBlock(b, { text: b.base })}>
+            {/* An outdated edit offers only "Use new": resetting it would do exactly the same. */}
+            {b.edited && !b.custom && !b.stale && (
+              <button type="button" onClick={() => reset(b)}>
                 Reset
               </button>
             )}
             {b.stale && !b.custom && (
-              <button type="button" onClick={() => patchBlock(b, { text: b.base })} title="Drop your edit and take the new generated text">
+              <button type="button" onClick={() => reset(b)} title="Drop your edit and take the new generated text">
                 Use new
               </button>
             )}
@@ -99,8 +141,13 @@ export default function BlockEditor({ file, edit = {}, change }) {
               + Below
             </button>
           </header>
-          <BlockText block={b} onText={(text) => setText(b, text)} />
-          {b.stale && b.base !== b.text && <p className="hint">Your edit is based on older generated text; the current generated text is:<pre className="inline">{b.base}</pre></p>}
+          <BlockText block={b} handle={handleFor(b.id)} onText={(text) => setText(b, text)} />
+          {b.stale && b.base !== b.text && (
+            <div className="hint">
+              Your edit is based on older generated text; the current generated text is:
+              <pre className="inline">{b.base}</pre>
+            </div>
+          )}
         </section>
       ))}
     </div>

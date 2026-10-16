@@ -22,7 +22,8 @@ test('meta describes stacks, targets and the option vocabularies', () => {
   assert.deepEqual(meta.kinds, ['dockerfile', 'dockerignore', 'compose', 'ci', 'deploy', 'repo']);
   assert.deepEqual(meta.extras, ['dependabot', 'devcontainer', 'makefile', 'editorconfig']);
   assert.deepEqual(meta.pipeline.registry, ['builtin', 'dockerhub', 'quay', 'custom', 'gar', 'ecr', 'acr']);
-  assert.deepEqual(meta.registries.find((r) => r.id === 'quay'), { id: 'quay', label: 'Quay.io', serverLogin: true });
+  assert.deepEqual(meta.registries.find((r) => r.id === 'quay'), { id: 'quay', label: 'Quay.io', serverLogin: true, oidc: false });
+  assert.equal(meta.registries.find((r) => r.id === 'gar').oidc, true);
   assert.equal(meta.registries.find((r) => r.id === 'ecr').serverLogin, false);
   assert.equal(meta.targets.find((t) => t.id === 'ssh').serverLogin, true);
   assert.ok(meta.targets.some((t) => t.id === 'cloudrun' && t.oidc && t.deploys && !t.files));
@@ -219,7 +220,7 @@ test('deployTo, changedOnly, sharedPaths and dbPerService reach the generator', 
   assert.match(ci, /deploy-production:/);
   assert.match(ci, /changes:/);
   assert.match(ci, /libs\/\.\*\$/);
-  assert.ok(data.files.some((f) => f.path === 'db/postgres/init.sql'));
+  assert.ok(data.files.some((f) => f.path === 'db/postgres/init.sh'));
   assert.equal(code(() => handleGenerate({ ...fullstack(), deploy: 'ssh', deployTo: ['qa'] })), 400);
   assert.equal(code(() => handleGenerate({ ...fullstack(), deploy: 'ssh', deployTo: [{ name: 'qa', on: 'nightly' }] })), 400);
   assert.equal(code(() => handleGenerate({ ...fullstack(), changedOnly: true, sharedPaths: 'a b c' })), 400);
@@ -238,4 +239,13 @@ test('each service can set its own runtime version and package manager', () => {
   assert.match(dockerfile('api/Dockerfile'), /FROM python:3\.11-slim[\s\S]*poetry/);
   assert.match(dockerfile('web/Dockerfile'), /FROM node:20-alpine[\s\S]*pnpm-lock\.yaml/);
   assert.match(dockerfile('site/Dockerfile'), /FROM node:24-alpine/);
+});
+
+test('cloud login choice reaches the generator and is validated', () => {
+  assert.deepEqual(getMeta().pipeline.cloudAuth, ['oidc', 'keys']);
+  const ci = (body) => handleGenerate({ stack: 'node', ci: 'github', deploy: 'cloudrun', ...body }).files.find((f) => f.path === '.github/workflows/ci.yml').content;
+  assert.match(ci({}), /workload_identity_provider/);
+  assert.match(ci({ cloudAuth: 'keys' }), /GCP_SA_KEY/);
+  assert.doesNotMatch(ci({ cloudAuth: 'keys' }), /workload_identity_provider/);
+  assert.equal(code(() => handleGenerate({ stack: 'node', ci: 'github', cloudAuth: 'magic' })), 400);
 });

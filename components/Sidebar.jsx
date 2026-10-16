@@ -6,7 +6,7 @@ import Networks from './Networks.jsx';
 import Services from './Services.jsx';
 import { LABELS, PRESETS, RUNNERS, RUNTIMES } from '../lib/form.js';
 
-export default function Sidebar({ form, set, meta, show, result, loading }) {
+export default function Sidebar({ form, set, meta, show, result }) {
   const { stack } = show;
   const stackOptions = opts(meta.stacks.map((s) => s.id));
   const selectedSteps = form.ciSteps ?? (show.multi ? [...new Set(result?.services?.flatMap((svc) => svc.ci.selected) ?? [])] : result?.ci?.selected) ?? [];
@@ -18,6 +18,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
     <div className="sidebar-body">
       <CheckGroup
         legend="Files to generate"
+        field="include"
         options={opts(meta.kinds.filter((k) => k !== 'deploy' || show.deployConfig), LABELS.kinds)}
         value={form.include}
         onChange={(v) => set('include', v)}
@@ -26,22 +27,24 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
       {show.extras && (
         <CheckGroup
           legend="Extra project files"
-          hint="(optional)"
+          field="extras"
+          hint="Optional; none by default."
           options={opts(meta.extras, LABELS.extras)}
           value={form.extras}
           onChange={(v) => set('extras', v)}
         />
       )}
 
-      {!show.multi && <SelectField label="Stack" value={form.stack} onChange={(v) => set('stack', v)} options={stackOptions} />}
-      <Services form={form} set={set} meta={meta} show={show} result={result} loading={loading} />
+      {!show.multi && <SelectField label="Stack" field="stack" value={form.stack} onChange={(v) => set('stack', v)} options={stackOptions} />}
+      <Services form={form} set={set} meta={meta} show={show} />
       {show.projectName && (
-        <TextField label="Project name" hint="Names the images and the deployed resources." value={form.name} placeholder="my-project" onChange={(v) => set('name', v)} />
+        <TextField label="Project name" field="name" hint="Names the images and the deployed resources." value={form.name} placeholder="my-project" onChange={(v) => set('name', v)} />
       )}
 
       {show.tool && (
         <SelectField
           label="Package manager"
+          field="tool"
           value={form.tool || stack.tools[0]}
           onChange={(v) => set('tool', v)}
           options={opts(stack.tools)}
@@ -50,7 +53,8 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
       {show.name && (
         <TextField
           label="Project name"
-          hint={LABELS.nameHints[stack.id]}
+          field="name"
+          hint={LABELS.nameHints[stack.id] ? `${LABELS.nameHints[stack.id]}; also names the images and the deployed resources.` : 'Names the images and the deployed resources.'}
           value={form.name}
           placeholder={LABELS.namePlaceholders[stack.id]}
           onChange={(v) => set('name', v)}
@@ -68,6 +72,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
       <div className="row">
         <ChoiceField
           label="Port"
+          field="port"
           value={form.port}
           defaultLabel={port ? `Default (${port})` : 'Default'}
           options={opts(PRESETS.ports.filter((p) => p !== String(port)))}
@@ -77,6 +82,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
         />
         <ChoiceField
           label="Runtime"
+          field="runtime"
           value={form.runtime}
           defaultLabel="Default"
           options={runtimes}
@@ -88,6 +94,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
       {show.buildDir && (
         <ChoiceField
           label="Build output folder"
+          field="buildDir"
           value={form.buildDir}
           defaultLabel="Default"
           options={opts(PRESETS.buildDirs)}
@@ -98,6 +105,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
       {show.databases && (
         <MultiField
           label={show.multi ? 'Services in compose (shared)' : 'Services in compose'}
+          field="db"
           hint={show.multi ? 'Databases and queues. Every backend gets them unless it has its own list.' : 'Databases and queues.'}
           options={opts(meta.dbs)}
           value={form.db}
@@ -108,16 +116,17 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
 
       {show.multi && show.databases && (
         <div className="field">
-          <Check checked={form.dbPerService} onChange={(v) => set('dbPerService', v)}>
+          <Check checked={form.dbPerService} field="dbPerService" onChange={(v) => set('dbPerService', v)}>
             A database per service <span className="hint">(shared server; SQL, MongoDB and redis)</span>
           </Check>
         </div>
       )}
 
-      <Section title="Image">
+      <Section title="Image build">
         {show.variants.length > 1 && (
           <SelectField
             label="Base image"
+            field="imageVariant"
             hint="alpine is the smallest; slim is Debian-based and avoids musl surprises. Default: what each stack normally uses."
             value={form.imageVariant}
             onChange={(v) => set('imageVariant', v)}
@@ -152,6 +161,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
       {show.compose && (
         <MultiField
           label="Environments"
+          field="envs"
           hint="A compose override per environment, layered over the base file. dev also gets a Dockerfile.dev with live reload."
           options={opts(['dev', 'qa', 'staging', 'prod'], LABELS.envs)}
           value={form.envs}
@@ -164,6 +174,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
         {show.compose && (
           <SelectField
             label="Compose restart policy"
+            field="restart"
             hint="Applied to every service in the compose file."
             value={form.restart}
             onChange={(v) => set('restart', v)}
@@ -172,6 +183,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
         )}
         <ChoiceField
           label="Healthcheck path"
+          field="healthcheck"
           hint="Adds a HEALTHCHECK probing this path."
           value={form.healthcheck}
           defaultLabel="None"
@@ -182,6 +194,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
         {show.packages && (
           <MultiField
             label="OS packages"
+            field="packages"
             hint="Installed in the runtime image (apk/apt names)."
             options={opts(PRESETS.packages)}
             value={form.packages}
@@ -192,6 +205,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
         {show.env && (
           <TextArea
             label="Environment variables"
+            field="env"
             hint="One NAME=value per line, baked into the image. No secrets."
             value={form.env}
             placeholder={'LOG_LEVEL=info\nTZ=UTC'}
@@ -201,6 +215,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
         {show.buildArgs && (
           <TextArea
             label="Build args"
+            field="buildArgs"
             hint="NAME or NAME=default per line (VITE_API_URL, NEXT_PUBLIC_*). Passed to the build in compose and CI."
             value={form.buildArgs}
             placeholder="VITE_API_URL=http://localhost:3000"
@@ -214,12 +229,14 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
           <Section title="CI/CD">
             <SelectField
               label="Provider"
+              field="ci"
               value={form.ci}
               onChange={(v) => set('ci', v)}
               options={meta.providers.map((p) => ({ value: p.id, label: p.label }))}
             />
             <ChoiceField
               label="Pipeline name"
+              field="pipelineName"
               value={form.pipelineName}
               options={opts(PRESETS.pipelineNames)}
               placeholder="CI"
@@ -235,6 +252,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             {show.multi && form.changedOnly && (
               <MultiField
                 label="Paths that rebuild every service"
+                field="sharedPaths"
                 hint="Globs, e.g. libs/**. The pipeline file always does."
                 options={opts(['libs/**', 'shared/**', 'package.json', 'docker-compose*.yml'])}
                 value={form.sharedPaths}
@@ -250,7 +268,8 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             {form.testJob && show.ciSteps.length > 0 && (
               <CheckGroup
                 legend="Steps in the test job"
-                hint={form.ciSteps ? '' : '(defaults to what the project defines)'}
+                field="ciSteps"
+                hint={form.ciSteps ? '' : 'Defaults to what the project defines.'}
                 options={opts(show.ciSteps, LABELS.steps)}
                 value={selectedSteps}
                 onChange={(v) => set('ciSteps', v)}
@@ -259,6 +278,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             {form.testJob && show.versions && (
               <MultiField
                 label="Runtime versions to test"
+                field="testVersions"
                 hint="One matrix entry per version. None = the project's own version."
                 options={runtimes}
                 value={form.testVersions}
@@ -269,6 +289,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             {form.testJob && show.can('os') && (
               <MultiField
                 label="Test on operating systems"
+                field="testOs"
                 options={opts(meta.pipeline.testOs)}
                 value={form.testOs}
                 emptyLabel="Default runner"
@@ -279,6 +300,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             {form.testJob && show.can('services') && (
               <MultiField
                 label="Service containers for tests"
+                field="ciServices"
                 hint="Started next to the test job."
                 options={opts(meta.dbs)}
                 value={form.ciServices}
@@ -300,6 +322,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
               <>
                 <MultiField
                   label="Branches"
+                  field="branches"
                   hint="Globs allowed (release/*)."
                   options={opts(PRESETS.branches)}
                   value={form.branches}
@@ -309,6 +332,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
                 {show.can('branchIgnore') && (
                   <MultiField
                     label="Never run for branches"
+                    field="branchesIgnore"
                     options={opts(PRESETS.branchesIgnore)}
                     value={form.branchesIgnore}
                     placeholder="Branch or glob"
@@ -325,9 +349,9 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             </div>
             {form.tagEvent && (
               <>
-                <MultiField label="Tags" hint="Globs such as v*." options={opts(PRESETS.tags)} value={form.tags} placeholder="Tag glob" onChange={(v) => set('tags', v)} />
+                <MultiField label="Tags" field="tags" hint="Globs such as v*." options={opts(PRESETS.tags)} value={form.tags} placeholder="Tag glob" onChange={(v) => set('tags', v)} />
                 {show.can('tagFilters') && (
-                  <MultiField label="Never run for tags" options={opts(PRESETS.tagsIgnore)} value={form.tagsIgnore} placeholder="Tag glob" onChange={(v) => set('tagsIgnore', v)} />
+                  <MultiField label="Never run for tags" field="tagsIgnore" options={opts(PRESETS.tagsIgnore)} value={form.tagsIgnore} placeholder="Tag glob" onChange={(v) => set('tagsIgnore', v)} />
                 )}
               </>
             )}
@@ -340,6 +364,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             {show.can('prBranches') && form.pullRequests && (
               <MultiField
                 label="Pull requests targeting"
+                field="prBranches"
                 hint="None = any branch."
                 options={opts(PRESETS.prBranches)}
                 value={form.prBranches}
@@ -350,7 +375,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
 
             <div className="field">
               <Check checked={form.manual} onChange={(v) => set('manual', v)}>
-                A manual run <span className="hint">(workflow_dispatch / Run pipeline)</span>
+                A manual run <span className="hint">(workflow_dispatch / Run pipeline; asks which CI steps to run)</span>
               </Check>
             </div>
 
@@ -372,6 +397,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
                 {form.scheduleEvent && (
                   <MultiField
                     label="Schedules"
+                    field="schedule"
                     hint="Cron entries (5 fields), UTC."
                     options={PRESETS.schedules.map((o) => ({ value: o.value, label: `${o.label} (${o.value})` }))}
                     value={form.schedule}
@@ -387,6 +413,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
               <>
                 <MultiField
                   label="Only when these paths change"
+                  field="paths"
                   hint="For pushes and pull requests. None = always."
                   options={opts(PRESETS.paths)}
                   value={form.paths}
@@ -395,6 +422,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
                 />
                 <MultiField
                   label="Ignore changes to"
+                  field="pathsIgnore"
                   options={opts(PRESETS.pathsIgnore)}
                   value={form.pathsIgnore}
                   placeholder="Path glob"
@@ -403,13 +431,14 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
               </>
             )}
             {!form.pushEvent && !form.tagEvent && !form.pullRequests && !form.manual && !form.release && !form.scheduleEvent && (
-              <p className="hint block error">Pick at least one event, or the pipeline would never run.</p>
+              <p className="hint block error" role="alert">Pick at least one event, or the pipeline would never run.</p>
             )}
           </Section>
 
           <Section title="Pipeline settings">
             <SelectField
               label="Concurrency"
+              field="concurrency"
               value={form.concurrency}
               onChange={(v) => set('concurrency', v)}
               options={opts(meta.pipeline.concurrency, LABELS.concurrency)}
@@ -417,6 +446,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             {show.can('runner') && runner && (
               <ChoiceField
                 label="Runner / agent"
+                field="runner"
                 hint="GitHub runs-on label, Azure vmImage or Jenkins agent label."
                 value={form.runner}
                 defaultLabel={`Default (${runner.default})`}
@@ -428,6 +458,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             {show.can('timeout') && (
               <ChoiceField
                 label="Job timeout"
+                field="timeout"
                 value={form.timeout}
                 defaultLabel="Default (no limit)"
                 options={PRESETS.timeouts.map((m) => ({ value: m, label: `${m} minutes` }))}
@@ -438,6 +469,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             )}
             <TextArea
               label="Pipeline environment variables"
+              field="pipelineEnv"
               hint="One NAME=value per line, set for every job. No secrets."
               value={form.pipelineEnv}
               placeholder={'LOG_LEVEL=info'}
@@ -461,6 +493,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             {show.can('permissions') && (
               <MultiField
                 label="Token permissions"
+                field="permissions"
                 hint="contents: read is always the base."
                 options={opts(meta.pipeline.permissions, Object.fromEntries(meta.pipeline.permissions.map((v) => [v, LABELS.permissions[v] ?? v.replace(/-(read|write)$/, ': $1')])))}
                 value={form.permissions}
@@ -472,10 +505,11 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
           </Section>
 
           {show.imageSupply && (
-            <Section title="Image">
+            <Section title="Image publishing">
               <CheckGroup
                 legend="Image tags"
-                hint="(besides the commit sha, which is always pushed)"
+                field="imageTags"
+                hint="Besides the commit sha, which is always pushed."
                 options={opts(meta.pipeline.imageTags, LABELS.imageTags)}
                 value={form.imageTags}
                 onChange={(v) => set('imageTags', v)}
@@ -483,6 +517,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
               {show.can('platforms') && (
                 <MultiField
                   label="Image platforms"
+                  field="platforms"
                   options={opts(meta.pipeline.platforms)}
                   value={form.platforms}
                   allowCustom={false}
@@ -528,6 +563,7 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
             {show.imageSupply && form.scan && (
               <CheckGroup
                 legend="Fail the scan on"
+                field="scanSeverity"
                 options={opts(meta.pipeline.severities, LABELS.severities)}
                 value={form.scanSeverity}
                 onChange={(v) => set('scanSeverity', v)}
@@ -538,16 +574,18 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
           <Section title="Deployment">
             <SelectField
               label="Deploy to"
+              field="deploy"
               value={form.deploy}
               onChange={(v) => set('deploy', v)}
               options={meta.targets.map((t) => ({ value: t.id, label: t.label }))}
             />
             {form.deploy === 'kubernetes' && (
-              <TextField label="Replicas" hint="Pods per service (default 2)." value={form.replicas} placeholder="2" inputMode="numeric" onChange={(v) => set('replicas', v)} />
+              <TextField label="Replicas" field="replicas" hint="Pods per service (default 2)." value={form.replicas} placeholder="2" inputMode="numeric" onChange={(v) => set('replicas', v)} />
             )}
             {show.registryChoice && (
               <SelectField
                 label="Image registry"
+                field="registry"
                 value={show.registries.some((r) => r.id === form.registry) ? form.registry : show.registries[0].id}
                 onChange={(v) => set('registry', v)}
                 options={show.registries.map((r) => ({ value: r.id, label: r.label }))}
@@ -558,12 +596,14 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
               <>
                 <SelectField
                   label="Deploy when"
+                  field="deployOn"
                   value={form.deployOn}
                   onChange={(v) => set('deployOn', v)}
                   options={opts(meta.pipeline.deployOn, LABELS.deployOn)}
                 />
                 <ChoiceField
                   label="Environment"
+                  field="environment"
                   hint="Lets you add approvals and scope secrets."
                   value={form.environment}
                   defaultLabel="Default (production)"
@@ -575,10 +615,14 @@ export default function Sidebar({ form, set, meta, show, result, loading }) {
               </>
             )}
             {show.oidc && (
-              <p className="hint block">
-                Tick “id-token: write” under Token permissions to log in with OIDC (no stored keys). Otherwise the pipeline reads a key
-                from a secret.
-              </p>
+              <SelectField
+                label="Cloud login"
+                field="cloudAuth"
+                hint="How GitHub signs in to GCP, AWS or Azure. OIDC needs a trust set up in the cloud (the setup notes list it); stored keys are long-lived secrets."
+                value={form.cloudAuth}
+                onChange={(v) => set('cloudAuth', v)}
+                options={opts(meta.pipeline.cloudAuth, LABELS.cloudAuth)}
+              />
             )}
           </Section>
         </>

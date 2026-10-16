@@ -1,10 +1,11 @@
 import { generate } from '../src/generate.js';
 import { isHosted } from '../src/api.js';
 import { requireAllowedHost } from '../lib/site.js';
-import { FEATURES, HOME_FAQ, PROVIDERS, STACKS, STEPS, TARGETS } from '../lib/home.js';
+import { DEVELOPER, FEATURES, HOME_FAQ, PROVIDERS, RELATED_TOOLS, STACKS, STEPS, TARGETS } from '../lib/home.js';
 import { LANDING, SAMPLE_DIR } from '../lib/landing.js';
 import SiteFooter from './SiteFooter.jsx';
 import SiteHeader from './SiteHeader.jsx';
+import ExternalLink from './ExternalLink.jsx';
 
 const SAMPLE_OPTS = { stack: 'node', tool: 'npm', name: 'web' };
 
@@ -25,7 +26,7 @@ function Chips({ title, items }) {
 export default async function Home() {
   await requireAllowedHost();
   const dockerfile = generate(SAMPLE_DIR, SAMPLE_OPTS).files.find((f) => f.path === 'Dockerfile');
-  const privacy = isHosted() ? 'Free. No sign-up. Nothing you enter is stored.' : 'Free. Runs locally: nothing leaves your machine.';
+  const privacy = isHosted() ? 'Free. No sign-up. Nothing you enter is stored on the server.' : 'Free. Runs locally: nothing leaves your machine.';
   return (
     <div className="site">
       <SiteHeader />
@@ -129,7 +130,31 @@ export default async function Home() {
           </div>
         </section>
 
-        <section className="band">
+        <section className="band" aria-labelledby="maker">
+          <div className="wrap">
+            <h2 id="maker">The developer and related tools</h2>
+            <ul className="cards">
+              <li className="card">
+                <h3>{DEVELOPER.name}</h3>
+                <p>{DEVELOPER.text}</p>
+                <ExternalLink className="card-link" href={DEVELOPER.url}>
+                  {DEVELOPER.name}'s portfolio
+                </ExternalLink>
+              </li>
+              {RELATED_TOOLS.map((tool) => (
+                <li key={tool.name} className="card">
+                  <h3>{tool.name}</h3>
+                  <p>{tool.text}</p>
+                  <ExternalLink className="card-link" href={tool.url}>
+                    {tool.linkText}
+                  </ExternalLink>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+
+        <section className="band band-alt">
           <div className="wrap wrap-narrow">
             <h2>Questions</h2>
             {HOME_FAQ.map(([question, answer]) => (

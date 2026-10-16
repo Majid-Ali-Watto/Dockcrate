@@ -1,5 +1,6 @@
 import { lines } from '../fsutil.js';
-import { DEFAULT_BUILD, apk, binaryRuntime, envLines, healthcheck, pkgs, systemUser } from '../container.js';
+import { DEFAULT_BUILD, DEV_ROOT, apk, binaryRuntime, envLines, healthcheck, pkgs, runAsOf, systemUser, userLine } from '../container.js';
+import { VERSIONS } from '../tools.js';
 
 const DEFAULT_VERSION = '1.25';
 
@@ -21,6 +22,7 @@ export const go = {
   dev: (i, port, c) => ({
     dockerfile: lines(
       '# syntax=docker/dockerfile:1',
+      DEV_ROOT,
       `FROM golang:${i.version}-alpine`,
       'WORKDIR /src',
       apk(c),
@@ -53,7 +55,7 @@ export const go = {
         'COPY . .',
         `RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /usr/local/bin/app ${target}`,
         systemUser(v),
-        'USER app',
+        userLine(),
         `ENV PORT=${port}`,
         envLines(c),
         `EXPOSE ${port}`,
@@ -77,6 +79,7 @@ export const go = {
   variants: ['alpine', 'slim'],
   defaultVariant: 'alpine',
   healthKind: (b) => (b.variant === 'alpine' ? 'wget' : 'tcp'),
+  runAs: () => runAsOf(10001),
   buildNotes: (i, b) => [
     b.mode === 'production' && `Production only: the image copies a binary called app from the project root, so build it first: CGO_ENABLED=0 go build -o app ${i.main === '.' ? '.' : `./${i.main}`} (the generated pipeline builds the image from the repository as it is).`,
     b.mode === 'mixed' && 'Build and production in one image: it keeps the Go toolchain and the sources next to the binary, so it is much bigger than a multi-stage image.',
@@ -90,7 +93,7 @@ export const go = {
         on('lint') && { run: 'go vet ./...', ciStep: 'lint' },
         on('test') && { run: 'go test ./...', ciStep: 'test' },
         on('build') && { run: 'go build ./...', ciStep: 'build' },
-        on('audit') && { run: ['go install golang.org/x/vuln/cmd/govulncheck@latest', 'govulncheck ./...'], ciStep: 'audit' },
+        on('audit') && { run: [`go install ${VERSIONS.govulncheck}`, 'govulncheck ./...'], ciStep: 'audit' },
       ],
     };
   },

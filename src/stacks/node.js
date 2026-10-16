@@ -1,9 +1,15 @@
 import { lines } from '../fsutil.js';
-import { DEFAULT_BUILD, argLines, envLines, healthcheck, pkgs } from '../container.js';
+import { DEFAULT_BUILD, DEV_ROOT, argLines, envLines, healthcheck, pkgs, runAsOf, userLine } from '../container.js';
 
 const LOCKFILES = { npm: 'package-lock.json', yarn: 'yarn.lock', pnpm: 'pnpm-lock.yaml' };
 const IGNORE = ['**/node_modules', 'dist', 'build', 'coverage', '.angular', '.next', 'npm-debug.log*'];
 const SYNTAX = '# syntax=docker/dockerfile:1';
+// The node user of the node images and the nginx user of the nginx-unprivileged ones, by number (Kubernetes runAsNonRoot).
+const NODE_UID = 1000;
+const NGINX_UID = 101;
+// Next.js writes its cache (and regenerated ISR pages) under .next: the one folder of the app the node user may write.
+const NEXT_DIR = '# Next.js writes its cache under .next: the only folder of the app the node user can write (it is empty for other apps).';
+const nextDir = (prefix = 'RUN ') => `${prefix}mkdir -p .next/cache && chown -R ${NODE_UID}:${NODE_UID} .next`;
 
 function install({ pm, hasLock }, prod = false) {
   if (pm === 'npm') return `${hasLock ? 'npm ci' : 'npm install'}${prod ? ' --omit=dev' : ''}`;
@@ -83,6 +89,7 @@ function nodeDev(i, port, c, cmd) {
   return {
     dockerfile: lines(
       SYNTAX,
+      DEV_ROOT,
       `FROM node:${i.version}-alpine`,
       'WORKDIR /app',
       corepack(i),
@@ -146,6 +153,8 @@ const spa = (id, { starterDir, testArgs = '', usesName = false }) => ({
   variants: ['alpine', 'slim'],
   defaultVariant: 'alpine',
   healthKind: (b) => (b.mode === 'mixed' ? probeOf(b.variant) : b.variant === 'alpine' ? 'wget' : 'curl'),
+  // nginx keeps its pid and temporary files in /tmp in the unprivileged image.
+  runAs: (i, b = DEFAULT_BUILD) => runAsOf(b.mode === 'mixed' ? NODE_UID : NGINX_UID),
   codeql: 'javascript-typescript',
   devcontainer: (i) => `mcr.microsoft.com/devcontainers/javascript-node:1-${i.version}`,
   ciSteps: CI_STEPS,
@@ -160,7 +169,7 @@ const spa = (id, { starterDir, testArgs = '', usesName = false }) => ({
   assumes: (i) => `a "build" script that writes to ${i.buildDir}/ (Vite-style; use the build folder option otherwise)`,
   dockerfile(i, port, c, b = DEFAULT_BUILD) {
     const v = b.variant ?? 'alpine';
-    const web = v === 'alpine' ? 'nginxinc/nginx-unprivileged:alpine' : 'nginxinc/nginx-unprivileged:bookworm';
+    const web = v === 'alpine' ? 'nginxinc/nginx-unprivileged:1.30-alpine' : 'nginxinc/nginx-unprivileged:1.30-trixie';
     const probe = v === 'alpine' ? 'wget' : 'curl';
     if (b.mode === 'mixed') {
       // One image: node builds the site and `serve` hands it out (no nginx, so no nginx.conf).
@@ -175,14 +184,14 @@ const spa = (id, { starterDir, testArgs = '', usesName = false }) => ({
         argLines(c),
         buildStep(i),
         'RUN npm install --global serve@14',
-        'USER node',
+        userLine(NODE_UID),
         `EXPOSE ${port}`,
         healthcheck(c, port, probeOf(v)),
         `CMD ${JSON.stringify(['serve', '-s', i.buildDir, '-l', String(port)])}`,
       );
     }
     if (b.mode === 'production') {
-      return lines(SYNTAX, `FROM ${web}`, 'COPY nginx.conf /etc/nginx/conf.d/default.conf', `COPY ${i.buildDir}/ /usr/share/nginx/html/`, `EXPOSE ${port}`, healthcheck(c, port, probe));
+      return lines(SYNTAX, `FROM ${web}`, 'COPY nginx.conf /etc/nginx/conf.d/default.conf', `COPY ${i.buildDir}/ /usr/share/nginx/html/`, userLine(NGINX_UID), `EXPOSE ${port}`, healthcheck(c, port, probe));
     }
     return lines(
       SYNTAX,
@@ -197,7 +206,9 @@ const spa = (id, { starterDir, testArgs = '', usesName = false }) => ({
       '',
       `FROM ${web}`,
       'COPY nginx.conf /etc/nginx/conf.d/default.conf',
+      // The site and the config belong to root; nginx runs as its own unprivileged user.
       `COPY --from=build /app/${i.buildDir}/ /usr/share/nginx/html/`,
+      userLine(NGINX_UID),
       `EXPOSE ${port}`,
       healthcheck(c, port, probe),
     );
@@ -251,6 +262,8 @@ export const node = {
   variants: ['alpine', 'slim'],
   defaultVariant: 'alpine',
   healthKind: (b) => probeOf(b.variant),
+  // npm and corepack write under the home folder; Next.js under .next/cache.
+  runAs: () => runAsOf(NODE_UID, { writable: ['/home/node', '/app/.next/cache'] }),
   codeql: 'javascript-typescript',
   devcontainer: (i) => `mcr.microsoft.com/devcontainers/javascript-node:1-${i.version}`,
   ciSteps: CI_STEPS,
@@ -280,8 +293,10 @@ export const node = {
         pkgs(c, v),
         manifest(i),
         `RUN ${install(i, true)}`,
-        'COPY --chown=node:node . .',
-        'USER node',
+        'COPY . .',
+        NEXT_DIR,
+        nextDir(),
+        userLine(NODE_UID),
         `EXPOSE ${port}`,
         healthcheck(c, port, probeOf(v)),
         `CMD ${JSON.stringify(cmd)}`,
@@ -297,12 +312,14 @@ export const node = {
         pkgs(c, v),
         manifest(i),
         `RUN ${install(i)}`,
-        'COPY --chown=node:node . .',
+        'COPY . .',
         argLines(c),
-        buildStep(i),
+        NEXT_DIR,
+        // In the same layer as the build, so .next is not stored twice.
+        i.scripts.build ? `RUN ${i.pm} run build && ${nextDir('')}` : nextDir(),
         env,
         envLines(c),
-        'USER node',
+        userLine(NODE_UID),
         `EXPOSE ${port}`,
         healthcheck(c, port, probeOf(v)),
         `CMD ${JSON.stringify(cmd)}`,
@@ -324,15 +341,19 @@ export const node = {
       'COPY . .',
       argLines(c),
       buildStep(i),
-      'RUN rm -rf node_modules',
+      // .next moves out of the way, so the runtime copies the app as root's and only .next as the node user's.
+      'RUN rm -rf node_modules && mkdir -p .next/cache && mv .next /next',
       '',
       'FROM base AS runtime',
       env,
       envLines(c),
       pkgs(c, v),
-      'COPY --from=build --chown=node:node /app ./',
-      'COPY --from=deps --chown=node:node /app/node_modules ./node_modules',
-      'USER node',
+      '# The code and its dependencies belong to root: the app can read them, not rewrite them.',
+      'COPY --from=build /app ./',
+      'COPY --from=deps /app/node_modules ./node_modules',
+      NEXT_DIR,
+      `COPY --from=build --chown=${NODE_UID}:${NODE_UID} /next ./.next`,
+      userLine(NODE_UID),
       `EXPOSE ${port}`,
       healthcheck(c, port, probeOf(v)),
       `CMD ${JSON.stringify(cmd)}`,

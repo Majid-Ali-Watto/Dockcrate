@@ -1,5 +1,6 @@
 import { block, changedGuard, changedLines, cmd, deployPlan, isMulti, jobId, manualLabel, mapLines, matchRegex, q, scalar, serviceEnv, serviceUrl, shellPlan, switchOn, switchVar, when } from './common.js';
 import { DBS } from '../compose.js';
+import { VERSIONS } from '../tools.js';
 
 const globToRegex = (glob) => glob.replace(/[.+^${}()|[\]\\/]/g, '\\$&').replace(/\*\*?/g, '.*');
 const anyOf = (globs) => `/^(${globs.map(globToRegex).join('|')})$/`;
@@ -58,7 +59,7 @@ function render(p) {
       block('changes', 'Job: changes', [
         'changes:',
         '  stage: .pre',
-        '  image: alpine:3',
+        `  image: ${VERSIONS.alpine}`,
         '  variables:',
         '    GIT_DEPTH: "0"',
         '  script:',
@@ -115,7 +116,7 @@ function render(p) {
       block('lint-dockerfile', 'Job: lint-dockerfile', [
         'lint-dockerfile:',
         '  stage: test',
-        '  image: hadolint/hadolint:latest-debian',
+        `  image: ${VERSIONS.hadolint}`,
         interruptible,
         timeout,
         '  script:',
@@ -188,6 +189,8 @@ export const gitlab = {
   variablesName: 'GitLab CI/CD variables',
   secretsLocation: 'GitLab (Settings > CI/CD > Variables; mask the secrets)',
   features: ['manual', 'schedule', 'services', 'timeout', 'tagFilters', 'branchIgnore', 'codeScan'],
+  deploySecretsNote: ({ secrets, environments }) =>
+    `Mark ${secrets} Protected and Masked and set their environment scope to ${environments}: only pipelines on protected branches and tags, in the deploy job of that environment, get them. Protect the branches and tags that deploy (Settings > Repository) and the environments themselves (Settings > CI/CD > Protected environments) to require an approval.`,
   notes: ({ triggers }) => (triggers.schedule.length ? [`GitLab schedules live in the UI: add a pipeline schedule with cron "${triggers.schedule[0]}" under CI/CD > Schedules.`] : []),
   render,
 };

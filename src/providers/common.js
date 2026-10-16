@@ -1,6 +1,7 @@
 // Helpers shared by every CI renderer (a renderer turns the pipeline description from buildPipeline into blocks).
-import { DBS, urlKey } from '../compose.js';
+import { DBS, forCi, urlKey } from '../compose.js';
 import { REGISTRIES } from '../deploy.js';
+import { VERSIONS } from '../tools.js';
 
 export { block } from '../blocks.js';
 
@@ -9,6 +10,10 @@ export const when = (cond, ...parts) => (cond ? parts : null);
 /** GitHub Actions expression, kept out of template literals so `${{` stays readable. */
 export const x = (expr) => '${{ ' + expr + ' }}';
 export const q = (v) => JSON.stringify(String(v));
+/** A POSIX single-quoted shell word: nothing inside expands ($VAR, $(...), backticks), and a ' is written as '\''. */
+export const shq = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
+/** `export NAME='value'` for a user-given pipeline variable, so its value reaches the job literally. */
+export const exportLine = ([k, v]) => `export ${k}=${shq(v)}`;
 
 /** The CI steps of the test job. A manual run offers each one a checkbox, and a step that is not ticked is skipped. */
 export const CI_STEPS = { lint: 'Lint', test: 'Tests', build: 'Build', audit: 'Dependency audit' };
@@ -31,19 +36,21 @@ export function mapLines(obj, pad) {
 
 // ---------------------------------------------------------------------------------------- service containers
 
-export const plain = (text) => text.replace('${DB_PASSWORD:-app}', 'app');
-export const healthCmd = (name) => (name === 'mongo' ? 'mongosh --quiet --eval 1' : DBS[name].healthcheck.slice(1).join(' '));
+/** A compose value as a CI job uses it: required passwords become the throwaway CI password (see CI_PASSWORD). */
+export const plain = forCi;
+/** The health command of a CI service container (no compose `$$` escapes, no password where CI has none). */
+export const healthCmd = (name) => (name === 'mongo' ? 'mongosh --quiet --eval 1' : DBS[name].ciHealth ?? DBS[name].healthcheck.slice(1).join(' '));
 
 /** [ENV_NAME, url] that points the tests at the service (`host` is localhost on GitHub, the alias elsewhere); `all` is every service of the job. */
 export function serviceUrl(name, host, all) {
-  const url = DBS[name].url[1];
+  const url = DBS[name].ciUrl ?? DBS[name].url[1];
   const key = urlKey(name, all);
   // URLs with a scheme carry the host after `@` or `//`; memcached's is a bare host:port.
   const hostAt = plain(url).includes('://') ? `(@|//)${name}:` : `^()${name}:`;
   return [key, plain(url).replace(new RegExp(hostAt), `$1${host}:`)];
 }
 
-export const serviceEnv = (name) => Object.fromEntries(Object.entries(DBS[name].env ?? {}).map(([k, v]) => [k, plain(v)]));
+export const serviceEnv = (name) => Object.fromEntries(Object.entries(DBS[name].ciEnv ?? DBS[name].env ?? {}).map(([k, v]) => [k, plain(v)]));
 
 // ------------------------------------------------------------------------------------- step ids and titles
 
@@ -225,7 +232,7 @@ export function shellPlan(p, app, vars, { alpine = true, ...pick } = {}) {
     p.imageTags.includes('latest') && `if ${vars.defaultBranchTest}; then docker tag "$IMAGE_REPO:${sha}" "$IMAGE_REPO:latest"; fi`,
     p.imageTags.includes('semver') && `if [ -n "$${vars.tag}" ]; then docker tag "$IMAGE_REPO:${sha}" "$IMAGE_REPO:\${${vars.tag}#v}"; fi`,
   ].filter(Boolean);
-  const scan = `docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.69.3 image --exit-code 1 --severity ${p.scanSeverity.join(',')} --ignore-unfixed "$IMAGE_REPO:${sha}"`;
+  const scan = `docker run --rm -v /var/run/docker.sock:/var/run/docker.sock ${VERSIONS.trivy} image --exit-code 1 --severity ${p.scanSeverity.join(',')} --ignore-unfixed "$IMAGE_REPO:${sha}"`;
 
   return {
     registry,

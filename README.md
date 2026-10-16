@@ -19,27 +19,30 @@ The UI fills the window: controls on the left (scrolling on their own), a live p
 
 - **A project**: pick stack, package manager / build tool, name, runtime and the rest. Copy each file or download them all as a `.zip`.
 - **Several services**: **Split into several services** opens a **Services** panel (name, folder, stack, runtime version, package manager, port and optional own databases per service, add / remove / back to one service). **Environments** adds a compose file per environment. Both show skeleton placeholders while the page, the preview or the block editor are still loading.
+- **Kept between visits**: the options and block edits are saved in this browser (`localStorage`, key `dockcrate-form-v1`) and restored on the next visit; **Start over** (next to the theme switch) clears them. Removing a service, network or deployment, going back to one service or one environment, and **Reset all edits** offer an **Undo** for a few seconds.
+- **Errors**: an option the generator refuses is named in the UI's words under its control (and in a banner above the preview, which keeps showing the last files that worked); the banner's message moves the focus to that control.
+- **Keyboard**: a skip link jumps to the preview (on phones also a visible "Jump to preview" / "Back to options"); the file tabs are a tab list (arrow keys, Home, End); focus moves to a sensible place after removing, adding, resetting or switching off.
 
-The page is built to score 100 in Lighthouse (performance, accessibility, best practices, SEO), on mobile and desktop: metadata, Open Graph / Twitter card, canonical, `robots.txt`, `sitemap.xml`, web manifest, favicon and app icons, JSON-LD, and four server-rendered guide pages (Dockerfile, Docker Compose, GitHub Actions and CI/CD pipeline generators) that show real generator output; a nonce-based Content-Security-Policy (`proxy.js`) plus frame/sniffing/referrer headers (`next.config.mjs`); gzip on large API responses; a light / dark / system theme switch.
+The page is built to score 100 in Lighthouse (performance, accessibility, best practices, SEO), on mobile and desktop: metadata, Open Graph / Twitter card, canonical, `robots.txt`, `sitemap.xml`, web manifest, favicon and app icons, JSON-LD, and four server-rendered guide pages (Dockerfile, Docker Compose, GitHub Actions and CI/CD pipeline generators) that show real generator output; a nonce-based Content-Security-Policy on every page, 404s included (`proxy.js`; `upgrade-insecure-requests` only when hosted) plus HSTS, frame, sniffing, referrer and permissions headers (`next.config.mjs`); gzip on large API responses; a light / dark / system theme switch.
 
-The API is Next route handlers (`app/api/*`) over `src/api.js`. It only answers requests whose `Host` is localhost and whose `Origin` (if any) is the same origin, and it never reads or writes the server's disk: it only returns the generated files.
+The API is Next route handlers (`app/api/*`) over `src/api.js`. It only answers requests whose `Host` is localhost and whose `Origin` (if any) is the same origin (`Origin: null` is refused), and it never reads or writes the server's disk: it only returns the generated files. Requests are bounded: a body of at most 512 KB (counted in bytes as it arrives), at most 32 services, 20 deploy environments, 10 compose environments, 20 networks and 50 entries in any other list (the CLI applies the same limits), and the generated files of one request may total 5 MB (more is a 413).
 
 ## What you can control
 
 | Area | Options |
 | --- | --- |
-| Stack | node (Express/Nest, …), react, vue, angular, fastapi, django, .NET, Java, Go, Rust, PHP (Laravel/Symfony/plain Composer), Ruby (Rails/Rack); tool: npm/yarn/pnpm, pip/uv/poetry, maven/gradle; runtime, port, name, build folder |
-| Files | Dockerfile (+`nginx.conf`), `.dockerignore`, compose (+`.env.example`), CI pipeline, deployment config; opt-in extras: Dependabot (Renovate off GitHub), dev container, Makefile, `.editorconfig` |
-| Image build | base image flavor (`alpine` or `slim`), multi-stage (default) or one stage: production only, or build and production mixed |
+| Stack | node (Express/Nest, …), react, vue, angular, fastapi, django, .NET, Java, Go, Rust, PHP (Laravel/Symfony/plain Composer), Ruby (Rails/Rack); tool: npm/yarn/pnpm, pip/uv/poetry, maven/gradle; runtime, port, project name (names the images and deployed resources, default `app`), build folder |
+| Files | Dockerfile (+`nginx.conf`), `.dockerignore` (also keeps `.env*`, keys, `.npmrc`/`.pypirc`, `.aws`/`.ssh` out from every folder of the context), compose (+`.env.example`), CI pipeline, deployment config; opt-in extras: Dependabot (Renovate off GitHub), dev container (with docker-in-docker, which runs privileged: the file says how to drop it), Makefile, `.editorconfig` |
+| Image build | base image flavor (`alpine` or `slim`), multi-stage (default) or one stage: production only, or build and production mixed; every image runs as a fixed numeric non-root user (`10001`, or the image's own: node `1000`, nginx `101`, .NET `1654`, www-data `33`) that owns none of the code, only the folders the framework writes to (`.next`, Rails `tmp`/`log`/`storage`, Laravel `storage`/`bootstrap/cache`); `Dockerfile.dev` alone runs as root, and says so |
 | Container | healthcheck path, OS packages (apk/apt), runtime env vars, build args (Node and static sites: `VITE_*`, `NEXT_PUBLIC_*`) |
-| Compose services | postgres, mysql, mariadb, mongo, redis, memcached, elasticsearch, rabbitmq, mailpit (health-gated `depends_on`, volumes, URLs; with several SQL engines the first keeps `DATABASE_URL` and the others get `POSTGRES_URL` / `MYSQL_URL` / `MARIADB_URL`; mysql and mariadb cannot be combined, both use port 3306) |
+| Compose services | postgres, mysql, mariadb, mongo, redis, memcached, elasticsearch, rabbitmq, mailpit (health-gated `depends_on`, volumes, URLs; with several SQL engines the first keeps `DATABASE_URL` and the others get `POSTGRES_URL` / `MYSQL_URL` / `MARIADB_URL`; mysql and mariadb cannot be combined, both use port 3306). No default passwords: each comes from `.env` (`DB_PASSWORD`, `DB_ROOT_PASSWORD`, `MONGO_PASSWORD`, `REDIS_PASSWORD`, `ELASTIC_PASSWORD`, `RABBITMQ_PASSWORD`) and compose refuses to start without it; Mongo, Redis and Elasticsearch run with authentication; the dev override publishes database ports on `127.0.0.1` only |
 | CI steps | lint, tests, build, dependency audit, per stack (e.g. ruff/pytest/pip-audit, `dotnet format`, `npm audit`); defaults to what the project already defines |
-| CI services | database/queue containers next to the test job, with URLs injected |
-| Image | multi-arch platforms, image registry (GHCR / GitLab, Docker Hub, Quay, self-hosted such as Harbor/Nexus/Artifactory, Artifact Registry, ECR, ACR), Trivy scan (fails on HIGH/CRITICAL), SBOM + provenance attestations, cosign keyless signing |
+| CI services | database/queue containers next to the test job, with URLs injected; they use a fixed throwaway password (`ci-test-only`), the CI redis none |
+| Image publishing | multi-arch platforms, image registry (GHCR / GitLab, Docker Hub, Quay, self-hosted such as Harbor/Nexus/Artifactory, Artifact Registry, ECR, ACR), Trivy scan (fails on HIGH/CRITICAL; the image is built and scanned before it is pushed and signed, on GitHub a multi-platform build scans one platform first), SBOM + provenance attestations, cosign keyless signing |
 | Code quality & security | Hadolint Dockerfile lint (GitHub, GitLab), CodeQL workflow (GitHub) or the SAST template (GitLab) |
 | CI provider | GitHub Actions, GitLab CI, Gitea/Forgejo Actions, Jenkins, Bitbucket Pipelines, Azure DevOps, CircleCI |
 | Triggers | every one is a switch you set: push branches (+ignored), tags (+ignored), pull/merge requests (+target branches), path filters, release published, manual runs, any number of cron schedules |
-| Pipeline | name, runner/agent, job timeout, pipeline-wide env, concurrency (cancel PR runs / all / queue / off), fine-grained GitHub token permissions, fail-fast, runtime-version and OS test matrix, test job on/off, dependency and layer caches, image tags (branch / tag / semver / latest), Trivy severities |
+| Pipeline | name, runner/agent, job timeout, pipeline-wide env, concurrency (cancel PR runs / all / queue / off), fine-grained GitHub token permissions (the workflow is `contents: read`; extras go to the image and deploy jobs only, never to the jobs that run the code; no checkout keeps the token), cloud login by OIDC (default) or stored keys on GitHub, fail-fast, runtime-version and OS test matrix, test job on/off, dependency and layer caches, image tags (branch / tag / semver / latest), Trivy severities |
 | Deployment | where to deploy, when (default branch / tag / manual), environment name; or several environments, each with its own branch, tag or manual rule |
 | Services | several projects in one repository: a Dockerfile per service folder, one compose file, one pipeline (test matrix per stack, image matrix, one deployment) |
 | Environments | `dev`, `qa`, `staging`, `prod` or your own: a compose override per environment, a `Dockerfile.dev` per service for `dev` |
@@ -49,16 +52,16 @@ The API is Next route handlers (`app/api/*`) over `src/api.js`. It only answers 
 | Target | Registry | Extra files | Notes |
 | --- | --- | --- | --- |
 | `registry` (default) | GHCR / GitLab registry | none | build and push only |
-| `ssh` | GHCR / GitLab registry | `image:` added to compose | scp the compose file, `docker compose pull && up -d`; pin host keys with `SSH_KNOWN_HOSTS` |
-| `kubernetes` | GHCR / GitLab registry | `k8s/deployment.yaml`, `k8s/service.yaml` | kubeconfig in `KUBE_CONFIG`; rollout is awaited; seccomp, no privilege escalation, all capabilities dropped, no service-account token; probes use the health path when set; optional `<app>-env` Secret for `DATABASE_URL` and friends |
+| `ssh` | GHCR / GitLab registry | `image:` added to compose | scp the compose file, `docker compose pull && up -d`; pin host keys with `SSH_KNOWN_HOSTS`; `docker logout` right after the pull (and on failure), so the registry token does not stay on the server |
+| `kubernetes` | GHCR / GitLab registry | `k8s/deployment.yaml`, `k8s/service.yaml` | kubeconfig in `KUBE_CONFIG` (a namespaced ServiceAccount's, not your admin one); rollout is awaited; `runAsNonRoot` with the image's numeric user, read-only root file system with `emptyDir` volumes for `/tmp` and the app's writable folders (not PHP: Laravel writes inside the app), seccomp, no privilege escalation, all capabilities dropped, no service-account token; probes use the health path when set; optional `<app>-env` Secret for `DATABASE_URL` and friends |
 | `cloudrun` | Artifact Registry | none | `gcloud run deploy` |
-| `ecs` | ECR | `ecs/task-definition.json` | registers a task definition revision, waits for stability |
+| `ecs` | ECR | `ecs/task-definition.json` | registers a task definition revision, waits for stability; the container runs as the image's numeric user (`readonlyRootFilesystem` stays off: Fargate volumes are root-owned) |
 | `azure` | ACR | none | Web App for Containers |
 | `fly` | none (Fly builds it) | `fly.toml` | no image job |
 
 ### Image flavor and build mode
 
-`--image alpine|slim` picks the base image (default: what each stack normally uses: alpine for Node, Go, Rust and static sites; slim, i.e. Debian-based, for the rest). `--no-multistage` builds one stage instead of a build stage plus a runtime stage, and `--single-stage production|mixed` says which one stage (default `production`). In the UI: **Image**.
+`--image alpine|slim` picks the base image (default: what each stack normally uses: alpine for Node, Go, Rust and static sites; slim, i.e. Debian-based, for the rest). `--no-multistage` builds one stage instead of a build stage plus a runtime stage, and `--single-stage production|mixed` says which one stage (default `production`). In the UI: **Image build**.
 
 | | multi-stage (default) | one stage, production only | one stage, build and production mixed |
 | --- | --- | --- | --- |
@@ -112,7 +115,7 @@ Deploys follow: `ssh` runs `docker compose pull/up -d <changed services>`, and t
 
 #### A database per service
 
-`--db-per-service` (UI: **A database per service**) gives every service its own database on the shared server: `postgres://…/api`, `…/billing`, `mongodb://mongo:27017/api`, and a numbered redis database each (`redis://redis:6379/0`, `/1`, up to 16). For postgres, mysql and mariadb an `db/<engine>/init.sql` creates the databases (mysql and mariadb also grant them to the `app` user) and is mounted into the container. The engines run it only when the data volume is first created: for a service added later, run the `CREATE DATABASE` by hand or recreate the volume. memcached, Elasticsearch, RabbitMQ and Mailpit stay shared; separate their data inside the app.
+`--db-per-service` (UI: **A database per service**) gives every service its own database on the shared server, and for postgres, mysql, mariadb and mongo its own user with its own password: `postgres://api:${DB_PASSWORD_API}@postgres:5432/api`, `mongodb://api:${MONGO_PASSWORD_API}@mongo:27017/api`, and a numbered redis database each (`redis://:…@redis:6379/0`, `/1`, up to 16). An init script per engine (`db/postgres/init.sh`, `db/mysql/init.sh`, `db/mariadb/init.sh`, `db/mongo/init.js`), mounted into the container, creates each database and its user, which can reach only that database; the passwords come from `.env` (`DB_PASSWORD_<SERVICE>`, `MONGO_PASSWORD_<SERVICE>`, listed in `.env.example`). The engines run it only when the data volume is first created: for a service added later, create its database and user by hand or recreate the volume. memcached, Elasticsearch, RabbitMQ and Mailpit stay shared; separate their data inside the app.
 
 Options are defaults for every service (`--db`, `--healthcheck`, `--packages`, `--env`, `--build-arg`, `--ci-steps`, test OS, registry, …); a service object can override `port`, `runtime`, `tool`, `buildDir`, `healthcheck`, `packages`, `env`, `buildArgs`, `db`, `ciSteps`, `testVersions` and, for a new project, `project` (the Django package, .NET project or Angular output name):
 
@@ -180,7 +183,7 @@ dockcrate --deploy ssh --envs qa,prod \
 
 `--registry` (or **Image registry** in the UI) picks where the image is pushed: `builtin` (GHCR / GitLab registry, the default), `dockerhub`, `quay`, `custom` (any registry host, e.g. Harbor, Nexus, Artifactory, Gitea), `gar`, `ecr` or `acr`. The cloud registries sign in with the same steps as their deploy target, including OIDC on GitHub. The Cloud Run, ECS and Azure targets always use their own registry, Fly builds the image itself, and `ssh` needs a username/token registry because the server logs in again to pull.
 
-Each run lists exactly which secrets and variables to create. Ticking `id-token: write` on a cloud target switches its login from a stored key to OIDC (GitHub only). Deploy jobs run in an environment and are serialised.
+Each run lists exactly which secrets and variables to create, and where the deploy-only ones belong on the provider (GitHub environment secrets with protection rules, GitLab protected and environment-scoped variables, Bitbucket deployment variables, Azure variable groups and environment approvals, Jenkins folder credentials, CircleCI restricted contexts). On GitHub the cloud targets and registries sign in with OIDC by default (`--cloud-auth oidc`, UI: **Cloud login**; no stored key); `--cloud-auth keys` uses a stored key instead, and ticking `id-token: write` still forces OIDC. The other providers use stored keys. Deploy jobs run in an environment and are serialised.
 
 ## Deploying to Vercel
 
@@ -190,13 +193,13 @@ After a successful deploy, a `prune-old-images` job keeps the two newest images 
 
 Vercel has no "deploy this image" flag, so the deploy step is a `Dockerfile.vercel` (`FROM` the pushed image) that Vercel builds from an otherwise empty folder (`vercel deploy --prod`, not `--prebuilt`: a local `vercel build` produces no container and the site would 404): what runs is exactly the image that was pushed. To set it up:
 
-- GitHub variables `VERCEL_TEAM_ID`, `VERCEL_TEAM_SLUG`, `VERCEL_PROJECT_ID`, `VERCEL_PROJECT_NAME`, and the secret `VERCEL_TOKEN`; a GitHub environment named `production`;
+- GitHub variables `VERCEL_TEAM_ID`, `VERCEL_TEAM_SLUG`, `VERCEL_PROJECT_ID`, `VERCEL_PROJECT_NAME`; a GitHub environment named `production` with protection rules (required reviewers, `main` only) and `VERCEL_TOKEN` as a secret **of that environment**, not of the repository: only the `deploy-production` and `prune-old-images` jobs run in it, and only the steps that call the Vercel CLI get the token;
 - on the Vercel team, a VCR OIDC policy with read-write access to the project (the push logs in with GitHub OIDC, no stored key);
 - on the Vercel project, the Framework Preset "Container" (with "Other" the deployment is Ready but serves a 404); `SITE_URL` is optional (see `.env.example`); this repo's `Dockerfile` sets it to `https://dockcrate.vercel.app`, so the live site's canonical, Open Graph, sitemap and robots URLs never depend on the host of a request (change it there if the site moves to another domain).
 
-The image sets `DOCKCRATE_HOSTED=1` itself (a container may not get Vercel's `VERCEL` variable). `docker run -p 3000:3000` works anywhere else.
+The image sets `DOCKCRATE_HOSTED=1` itself (a container may not get Vercel's `VERCEL` variable). `docker run -p 3000:3000` works anywhere else. It runs as the unprivileged `node` user; Vercel sends traffic to port 80, so the generated `Dockerfile.vercel` gives the node binary the `cap_net_bind_service` capability (with `setcap`, removed again) and switches back to `node` rather than running as root. The Vercel CLI the workflow runs is pinned with a lockfile in `.github/vercel` and installed with `npm ci --ignore-scripts` (not `npx`), so nothing unpinned runs next to the token; bump it there (`npm install --package-lock-only --prefix .github/vercel`). Every checkout uses `persist-credentials: false`.
 
-The hosted site runs in **hosted mode** (switched on by Vercel's `VERCEL` variable, or by `DOCKCRATE_HOSTED=1`, which the `Dockerfile` sets):
+The hosted site runs in **hosted mode** (switched on by Vercel's `VERCEL` variable, or by `DOCKCRATE_HOSTED=1`, which the `Dockerfile` sets; `VERCEL_ENV=development`, which `vercel env pull` writes into a local `.env`, is not hosted unless `DOCKCRATE_HOSTED=1` says so):
 
 - pick a stack and options, then copy, download (.zip) or edit the files;
 - cross-site requests are still rejected; the page, `robots.txt`, `sitemap.xml`, canonical and Open Graph URLs use `SITE_URL`, else the production domain, else the request's own host (preview deployments are noindexed by Vercel);
@@ -207,16 +210,16 @@ The hosted site runs in **hosted mode** (switched on by Vercel's `VERCEL` variab
 `dockcrate [dir] [options]` — run `dockcrate --help` for the full list. Everything in the table above has a flag, for example:
 
 ```sh
-dockcrate --stack fastapi --tool uv --deploy cloudrun --permissions id-token-write \
+dockcrate --stack fastapi --tool uv --deploy cloudrun --cloud-auth oidc \
     --ci-steps lint,test,audit --ci-services postgres --scan \
     --healthcheck /health --packages libpq5 --env LOG_LEVEL=info --test-versions 3.12,3.13
 ```
 
-Supply chain: GitHub workflows reference every action by full commit SHA with the tag as a comment (`--no-pin-actions` for plain tags; Gitea never pins; `npm run pins` re-resolves the SHAs, and the Dependabot extra keeps them current). Trivy is only ever emitted at versions outside the March 2026 compromise (trivy-action 0.35.0, image 0.69.3). Next.js apps get a dedicated image: with `output: 'standalone'` in `next.config.*` the runtime stage ships only the traced server, `.next/static` and `public/`; without it the image runs `next start -H 0.0.0.0`, because the usual `-H 127.0.0.1` start script would make the container unreachable.
+Supply chain: GitHub and Gitea workflows reference every action by full commit SHA with the tag as a comment (`--no-pin-actions` for plain tags; `npm run pins` re-resolves the SHAs, and the Dependabot extra keeps them current). Tool images and binaries (Hadolint, Trivy, AWS/Azure/Google CLIs, flyctl, alpine, uv, the PHP extension installer, govulncheck, CircleCI images) carry explicit release tags, never `latest` or a branch, from one list in `src/tools.js`. Trivy is only ever emitted at versions outside the March 2026 compromise (trivy-action 0.35.0, image 0.69.3). Next.js apps get a dedicated image: with `output: 'standalone'` in `next.config.*` the runtime stage ships only the traced server, `.next/static` and `public/`; without it the image runs `next start -H 0.0.0.0`, because the usual `-H 127.0.0.1` start script would make the container unreachable.
 
 Supply-chain and extras flags: `--registry dockerhub`, `--lint-dockerfile`, `--sbom`, `--sign`, `--code-scan`, `--extras dependabot,devcontainer,makefile,editorconfig`. SBOM and signing are GitHub-only; CodeQL covers node, python, java, .NET, go, rust and ruby (not PHP).
 
-`--dry-run` prints instead of writing, `--only dockerfile,ci` limits the file groups, `--force` overwrites. Anything the tool had to guess is printed as a note.
+`--dry-run` prints instead of writing, `--only dockerfile,ci` limits the file groups, `--force` overwrites. It never writes through a symbolic link inside the project folder (a linked file, or a linked folder such as `.github`): every path is checked before anything is written, and the run stops with an error instead. Anything the tool had to guess is printed as a note.
 
 Nothing is switched on or off behind your back: a setting that cannot work (for example a deploy-on-tag rule with no tag trigger) is reported in the notes instead of being rewritten, and an option the chosen provider cannot express is named in the notes and left out.
 
@@ -229,7 +232,7 @@ Treat the output as a very good first draft: a few small edits after you downloa
 - **Deployment files: templates.** No deploy target has been run against a real cloud account or server; adjust names, regions, resources and permissions.
 - **New options need the same care:** the image flavors and build modes were checked by generating every stack in every combination and by real `docker build`s of the six Node combinations and of the Python multi-stage image (this machine has no BuildKit and a slow registry link, so everything else, including every production-only and mixed variant of the compiled stacks, was checked by reading the output, not by building it).
 
-The UI shows this next to the notes, the CLI prints it after them, and every guess or limitation of a run is listed in the notes. Edit any block in the preview (or the files afterwards): edits survive option changes.
+The UI shows this next to the notes, the CLI prints it after them, and every guess or limitation of a run is listed in the notes. Edit any block in the preview (or the files afterwards): edits survive option changes, and the web UI keeps the options and edits in your browser (`localStorage`, never on the server) until you press **Start over**.
 
 ## Layout
 
@@ -242,13 +245,14 @@ src/                  the generator (plain ESM, no dependencies)
   compose.js          compose, networks, environments   container.js healthcheck/packages/env/args, image flavors
   blocks.js           the editable blocks               extras.js   Dependabot/Renovate, devcontainer, Makefile, .editorconfig
   api.js              JSON handlers + request guard     fsutil.js   line-joining helpers
-app/                  Next.js (App Router): landing page (/), editor (/generator), guide pages (/dockerfile-generator, ...), /api/generate, metadata (layout, manifest, robots, sitemap, icons), loading skeleton
+  hosted.js           hosted-mode check (also proxy.js)  tools.js    pinned versions of the tool images/binaries in the output
+app/                  Next.js (App Router): landing page (/), editor (/generator), guide pages (/dockerfile-generator, ...), privacy and terms (/privacy, /terms; copy in lib/legal.js), /api/generate, metadata (layout, manifest, robots, sitemap, icons), loading skeleton
 components/ lib/      UI (React client components, form state, zip, grouping files by service, site origin)
 proxy.js              per-request Content-Security-Policy (nonce)
-Dockerfile            the hosted site image; .github/workflows/deploy.yml tests, pushes it to VCR and deploys it; vercel.json turns Vercel's Git deploys off
+Dockerfile            the hosted site image; .github/workflows/deploy.yml tests, pushes it to VCR and deploys it (with the Vercel CLI pinned in .github/vercel); vercel.json turns Vercel's Git deploys off
 public/               logo, social image, PNG icons (generated)
 scripts/              build-icons.mjs (`npm run icons`, needs Chrome) and update-pins.mjs (`npm run pins`, needs git and network)
-test/                 node:test: generator, API, services, events, networks, image build modes, zip
+test/                 node:test: generator, API, services, events, networks, image build modes, zip, security limits
 ```
 
 Adding a stack means one object in `src/stacks/` (`starter`, `dockerfile(info, port, c, { variant, mode })` (all three modes, see above), `variants`/`defaultVariant`, `dev` (the `Dockerfile.dev`), `ci`, its `ciSteps`/`ciDefaults`, and optionally `ecosystem`, `codeql`, `devcontainer` for the extras and CodeQL) plus a line in `src/stacks/index.js`.
@@ -267,7 +271,7 @@ Each generated file is a list of named blocks (a GitHub step, a GitLab job, a Do
 }
 ```
 
-Edits are kept when the options change. A block whose generated text changed after you edited it is flagged **outdated** (you can take the new text); an id that no longer exists is reported in the notes.
+Edits are kept when the options change. Limits: 500 edited files, 1000 changed and 200 added blocks per file, 50 new files of at most 32 KB each; a new file's path is relative, with no `..`, no `.git` folder (in any case, with trailing dots or as `GIT~1`) and no part starting with `-`. The same rules apply to service folders. A block whose generated text changed after you edited it is flagged **outdated** (you can take the new text); an id that no longer exists is reported in the notes.
 
 ## Providers at a glance
 
@@ -276,7 +280,7 @@ Edits are kept when the options change. A block whose generated text changed aft
 | GitHub Actions | `.github/workflows/ci.yml` (+ `codeql.yml`) | everything: OIDC, SBOM, cosign, CodeQL, permissions, OS matrix, caches |
 | Gitea / Forgejo | `.gitea/workflows/ci.yml` | the GitHub renderer without GitHub-only features |
 | GitLab CI | `.gitlab-ci.yml` | rules from the trigger options, SAST template, dind image build |
-| Jenkins | `Jenkinsfile` | declarative; Docker Pipeline plugin; secrets as credentials; branch/PR discovery is configured in the multibranch job |
+| Jenkins | `Jenkinsfile` | declarative; Docker Pipeline plugin; secrets as credentials; branch/PR discovery is configured in the multibranch job; test service containers on a network of their own per build; the image stage mounts the agent's Docker socket (root on the agent), so give it a dedicated agent |
 | Bitbucket Pipelines | `bitbucket-pipelines.yml` | reusable steps, one pipeline section per trigger |
 | Azure DevOps | `azure-pipelines.yml` | triggers, schedules, matrix, tool installer tasks, deployment job |
 | CircleCI | `.circleci/config.yml` | workflow filters, matrix, approval gate for manual deploys |
@@ -285,4 +289,10 @@ Only GitHub-only features (SBOM, signing, CodeQL, token permissions…) are skip
 
 ## Checks
 
-`npm test` runs the unit tests. The generated files were also validated with actionlint (GitHub and Gitea workflows), `docker compose config`, a YAML parse of every other provider's file, a Groovy syntax check of the Jenkinsfiles (not run on a Jenkins server, nor the Bitbucket/Azure/CircleCI files on their services), and real `docker build` + `docker run` of representative images (the Go, Rust, PHP and Ruby images were built, run and healthchecked; this machine had no BuildKit, so the `--mount` cache flags were stripped for those runs). No deploy target has been run against a real cloud account.
+`npm test` runs the unit tests. The generated files were also validated with actionlint (GitHub and Gitea workflows), `docker compose config`, a YAML parse of every other provider's file, a Groovy syntax check of the Jenkinsfiles (not run on a Jenkins server, nor the Bitbucket/Azure/CircleCI files on their services), and real `docker build` + `docker run` of representative images (the Go, Rust, PHP and Ruby images were built, run and healthchecked; this machine had no BuildKit, so the `--mount` cache flags were stripped for those runs). Later changes to the images (numeric users, code owned by root, writable folders) and the database init scripts were checked by reading the output and with `docker compose config`, not by building or running them. No deploy target has been run against a real cloud account.
+
+## Developer and related tools
+
+Dockcrate is built by [Majid Ali](https://majidev.netlify.app/), a full stack developer.
+
+Related tool: [Docker Control Panel](https://github.com/Majid-Ali-Watto/docker-control-panel-linux), a graphical Docker manager for Linux (containers, images, volumes, networks and Compose projects, with live stats). Dockcrate writes the files for a new project; Docker Control Panel manages what runs from them.

@@ -6,7 +6,10 @@ name: CI/CD
 #
 # Repository settings (Settings > Secrets and variables > Actions):
 #   variables: VERCEL_TEAM_ID (team_...), VERCEL_TEAM_SLUG, VERCEL_PROJECT_ID (prj_...), VERCEL_PROJECT_NAME
-#   secret:    VERCEL_TOKEN (Account Tokens page)
+# Environment "production" (Settings > Environments), with protection rules (required reviewers, main only):
+#   secret:    VERCEL_TOKEN (Account Tokens page). Only the jobs that run in that environment can read it.
+# The Vercel CLI comes from .github/vercel (package.json + package-lock.json, installed with npm ci --ignore-scripts),
+# so every dependency it runs with the token in reach is pinned by the lockfile; bump it there, not with npx.
 # On the Vercel team, a VCR OIDC policy with read-write access to the project lets the push below log in without a stored key.
 # The Vercel project's Framework Preset must be "Container" (Settings > Build and Deployment); "Other" ships a deployment with no container and 404s.
 
@@ -34,6 +37,8 @@ jobs:
     steps:
       - name: Check out the code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false # no token left in .git/config for npm scripts or the build to read
       - name: Set up Node.js 24 with the npm cache
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -58,6 +63,8 @@ jobs:
     steps:
       - name: Check out the code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false # no token left in .git/config for npm scripts or the build to read
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Log in to Vercel Container Registry
@@ -91,32 +98,53 @@ jobs:
       group: deploy-production
       cancel-in-progress: false
     env:
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ vars.VERCEL_TEAM_ID }}
       VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
     steps:
+      - name: Check out the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Set up Node.js 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
+      # Installed before the token is in any step's environment, without install scripts.
+      - name: Install the pinned Vercel CLI
+        run: npm ci --prefix .github/vercel --ignore-scripts --no-audit --no-fund
       # Vercel has no "deploy this image" flag: a deployment is built from a Dockerfile.vercel, so the deployed
       # project is just that file pointing at the image tested and pushed above. No source code is uploaded.
       # Vercel does the build (a local `vercel build --prebuilt` produces no container, so the site would 404);
       # its build pulls the image from VCR with the project's own credentials. The service and rewrite in vercel.json
       # are what route traffic to the container; without them the deployment is Ready but every path is a 404.
-      # USER root and PORT=80 because Vercel sends traffic to port 80 unless the project sets PORT.
+      # Vercel sends traffic to port 80 unless the project sets PORT. Binding a port below 1024 normally needs root; instead the
+      # node binary gets the one capability that allows it (cap_net_bind_service) and the server keeps running as `node`
+      # (the image is node:24-alpine, so apk; the tool that sets it is removed again).
       - name: Deploy the pushed image to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL: ${{ github.workspace }}/.github/vercel/node_modules/.bin/vercel
+        # Outside the checkout (only .github/vercel is needed from it), so nothing but these two files is uploaded.
         run: |
-          mkdir deploy
-          cat > deploy/vercel.json <<'JSON'
+          deploy="$RUNNER_TEMP/deploy"
+          mkdir "$deploy"
+          cat > "$deploy/vercel.json" <<'JSON'
           {
             "services": { "app": { "root": ".", "entrypoint": "Dockerfile.vercel", "runtime": "container" } },
             "rewrites": [{ "source": "/(.*)", "destination": { "service": "app" } }]
           }
           JSON
-          printf 'FROM %s\nUSER root\nENV PORT=80\n' "$IMAGE" > deploy/Dockerfile.vercel
-          cd deploy
-          npx --yes vercel@59.26.0 deploy --prod --token "$VERCEL_TOKEN"
+          cat > "$deploy/Dockerfile.vercel" <<DOCKERFILE
+          FROM $IMAGE
+          USER root
+          RUN apk add --no-cache --virtual .setcap libcap \\
+              && setcap 'cap_net_bind_service=+ep' "\$(readlink -f "\$(command -v node)")" \\
+              && apk del .setcap
+          USER node
+          ENV PORT=80
+          DOCKERFILE
+          cd "$deploy"
+          "$VERCEL" deploy --prod --token "$VERCEL_TOKEN"
 
   # Keep two images in the repository: the one just deployed and the one before it (a rollback target).
   # Only images tagged with a full commit SHA are considered, i.e. the ones this workflow pushed; anything Vercel
@@ -125,21 +153,31 @@ jobs:
     name: Delete old images from VCR
     needs: deploy-production
     runs-on: ubuntu-latest
-    permissions: {}
+    environment: production # VERCEL_TOKEN is a secret of this environment
+    permissions:
+      contents: read # to check out .github/vercel
     concurrency:
       group: prune-vcr
       cancel-in-progress: false
     env:
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ vars.VERCEL_TEAM_ID }}
       VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
       KEEP: 2
     steps:
+      - name: Check out the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Set up Node.js 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
+      - name: Install the pinned Vercel CLI
+        run: npm ci --prefix .github/vercel --ignore-scripts --no-audit --no-fund
       - name: Keep the two newest images, delete the rest
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL: ${{ github.workspace }}/.github/vercel/node_modules/.bin/vercel
         run: |
           set -euo pipefail
           repo=${IMAGE#vcr.vercel.com/*/*/}; repo=${repo%%:*}
@@ -163,5 +201,5 @@ jobs:
             || { echo "::error::image $GITHUB_SHA is not among the $KEEP newest in $repo; nothing was deleted"; exit 1; }
           jq -r --argjson keep "$KEEP" '.[$keep:][] | "\(.id) \(.tag)"' <<<"$ours" | while read -r id tag; do
             echo "deleting $repo:$tag ($id)"
-            npx --yes vercel@59.26.0 vcr image rm "$repo" "$id" --yes --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN" </dev/null
+            "$VERCEL" vcr image rm "$repo" "$id" --yes --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN" </dev/null
           done

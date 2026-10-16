@@ -1,5 +1,5 @@
 import { lines } from '../fsutil.js';
-import { DEFAULT_BUILD, apk, binaryRuntime, envLines, healthcheck, systemUser } from '../container.js';
+import { DEFAULT_BUILD, DEV_ROOT, apk, binaryRuntime, envLines, healthcheck, runAsOf, systemUser, userLine } from '../container.js';
 
 export const rust = {
   id: 'rust',
@@ -19,6 +19,7 @@ export const rust = {
   dev: (i, port, c) => ({
     dockerfile: lines(
       '# syntax=docker/dockerfile:1',
+      DEV_ROOT,
       `FROM rust:${i.version}-alpine`,
       'RUN apk add --no-cache musl-dev',
       apk(c),
@@ -53,7 +54,7 @@ export const rust = {
         'RUN --mount=type=cache,target=/usr/local/cargo/registry \\',
         `    cargo build --release${i.locked ? ' --locked' : ''} && cp target/release/${i.name} /usr/local/bin/app`,
         systemUser(v),
-        'USER app',
+        userLine(),
         `ENV PORT=${port}`,
         envLines(c),
         `EXPOSE ${port}`,
@@ -77,6 +78,7 @@ export const rust = {
   variants: ['alpine', 'slim'],
   defaultVariant: 'alpine',
   healthKind: (b) => (b.variant === 'alpine' ? 'wget' : 'tcp'),
+  runAs: () => runAsOf(10001),
   buildNotes: (i, b) => [
     b.mode === 'production' &&
       `Production only: the image copies the binary you built (${b.variant === 'alpine' ? `target/x86_64-unknown-linux-musl/release/${i.name}: cargo build --release --target x86_64-unknown-linux-musl, with the musl target installed; use the aarch64 triple on ARM` : `target/release/${i.name}: cargo build --release, on a Debian-compatible host`}); the generated pipeline builds the image from the repository as it is.`,

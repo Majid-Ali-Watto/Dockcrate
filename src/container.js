@@ -31,9 +31,28 @@ export const apt = (c) =>
 /** OS packages with whatever installer the flavor has. */
 export const pkgs = (c, variant) => (variant === 'alpine' ? apk(c) : apt(c));
 
-/** A non-root system user `app` (and its group) on either flavor. */
-export const systemUser = (variant, uid = 10001) =>
-  variant === 'alpine' ? `RUN addgroup -S -g ${uid} app && adduser -S -u ${uid} -G app app` : `RUN useradd --system --uid ${uid} app`;
+/** The fixed uid and gid of the `app` user the stacks create, so Kubernetes can check runAsNonRoot and match runAsUser. */
+export const APP_UID = 10001;
+
+/** A non-root system user `app` (and its group `app`), both with the fixed id, on either flavor. */
+export const systemUser = (variant, { uid = APP_UID, home = false } = {}) =>
+  variant === 'alpine'
+    ? `RUN addgroup -S -g ${uid} app && adduser -S -u ${uid} -G app app`
+    : `RUN groupadd --system --gid ${uid} app && useradd --system --uid ${uid} --gid app${home ? ' --create-home' : ''} app`;
+
+/** `USER` by number, not by name: Kubernetes can only enforce runAsNonRoot on a numeric user. */
+export const userLine = (uid = APP_UID, gid = uid) => `USER ${uid}:${gid}`;
+
+/**
+ * Who the image runs as and what it writes, for the deploy targets (Kubernetes securityContext, ECS user): `uid`/`gid`, the
+ * folders that must stay writable (/tmp always; each gets an emptyDir when the root file system is read-only) and whether a
+ * read-only root file system works for the stack.
+ */
+export const runAsOf = (uid, { gid = uid, writable = [], readOnlyRoot = true, why = '' } = {}) => ({ uid, gid, writable: ['/tmp', ...writable], readOnlyRoot, why });
+
+/** First comment of every Dockerfile.dev: it is the one image that runs as root, on purpose. */
+export const DEV_ROOT =
+  '# Development only: runs as root so the mounted or synced source and the tool caches stay writable. Never deploy it; the production Dockerfile runs as a non-root user.';
 
 /**
  * `kind` is how the image can probe itself: 'wget' (alpine/busybox), 'curl', 'python' (urllib), 'node' (fetch) or 'tcp' (bash only:
@@ -67,9 +86,9 @@ export function binaryRuntime(c, port, variant, copy, binary = '/usr/local/bin/a
     alpine
       ? ['RUN apk add --no-cache ca-certificates tzdata', apk(c)]
       : apt({ packages: ['ca-certificates', 'tzdata', ...c.packages] }),
-    alpine ? 'RUN adduser -S -u 10001 app' : 'RUN useradd --system --uid 10001 app',
+    systemUser(variant),
     copy,
-    'USER app',
+    userLine(),
     `ENV PORT=${port}`,
     envLines(c),
     `EXPOSE ${port}`,

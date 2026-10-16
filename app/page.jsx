@@ -1,6 +1,7 @@
 import Home from '../components/Home.jsx';
 import { siteOrigin } from '../lib/site.js';
-import { PROVIDERS, STACKS, TARGETS } from '../lib/home.js';
+import { scriptJson } from '../src/api.js';
+import { DEVELOPER, PROVIDERS, STACKS, TARGETS } from '../lib/home.js';
 import pkg from '../package.json' with { type: 'json' };
 
 // Rendered per request: the Host check and the canonical origin come from the request.
@@ -8,7 +9,7 @@ export const dynamic = 'force-dynamic';
 
 export default async function Page() {
   const origin = await siteOrigin();
-  const jsonLd = JSON.stringify({
+  const jsonLd = scriptJson({
     '@context': 'https://schema.org',
     '@type': 'SoftwareApplication',
     name: 'Dockcrate',
@@ -27,6 +28,7 @@ export default async function Page() {
       `${TARGETS.length} deployment options: Kubernetes, ECS, Cloud Run, Fly, Azure and SSH`,
     ],
     offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+    author: { '@type': 'Person', name: DEVELOPER.name, url: DEVELOPER.url, jobTitle: DEVELOPER.role },
   });
   return (
     <>

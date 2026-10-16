@@ -32,7 +32,7 @@ Usage: dockcrate [dir] --stack <id> [options]
   dir                  the project folder the files are written to (default: current directory); nothing in it is read
   --stack <id>         ${stackIds().join(' | ')}
   --tool <name>        package manager / build tool: npm|yarn|pnpm, pip|uv|poetry, maven|gradle
-  --name <name>        project name (angular output folder, django project, .NET project)
+  --name <name>        project name: names the images and deployed resources (also the angular output folder, django project, .NET project)
   --no-build           node server without a build step (plain JavaScript)
   --service <spec>     one service: [name=]dir:stack[@port], repeatable, e.g. --service api=./api:django@8000 --service web=./web:vue
   --services <file>    services as JSON: [{ "name": "api", "dir": "api", "stack": "django", "port": 8000, "db": ["postgres"], ... }]
@@ -77,12 +77,13 @@ Usage: dockcrate [dir] --stack <id> [options]
   --pipeline-env N=v   pipeline-wide environment variable (repeatable)
   --image-tags <list>  image tags besides the commit sha: branch, tag, semver, latest (default: branch,tag,latest)
   --scan-severity <l>  Trivy severities that fail the scan (default: HIGH,CRITICAL)
-  --no-pin-actions     reference GitHub actions by tag instead of full commit SHA (SHAs are the default)
+  --no-pin-actions     reference GitHub/Gitea actions by tag instead of full commit SHA (SHAs are the default)
   --no-dep-cache       do not cache dependencies in CI (GitHub)
   --no-layer-cache     do not use the Docker layer cache (GitHub)
   --edits <file.json>  your edits to generated blocks: { "<file>": { "blocks": { "<id>": { "text"?, "disabled"? } }, "add": [...] } }
   --concurrency <m>    ${CONCURRENCY.join(' | ')}: which superseded runs to cancel (default: prs)
-  --permissions <list> extra GitHub token permissions: ${PERMISSIONS.join(', ')}
+  --permissions <list> extra GitHub token permissions, granted to the image and deploy jobs only: ${PERMISSIONS.join(', ')}
+  --cloud-auth <mode>  oidc | keys: how GitHub signs in to GCP, AWS and Azure (default oidc: short-lived tokens, no stored keys)
   --test-versions <l>  run tests on these runtime versions, comma-separated (matrix)
   --test-os <list>     GitHub test runners: ${TEST_OS.join(', ')}
   --platforms <list>   image platforms: ${PLATFORMS.join(', ')}
@@ -90,7 +91,7 @@ Usage: dockcrate [dir] --stack <id> [options]
   CI steps and services:
   --ci-steps <list>    steps to run: lint, test, build, audit, or "none" (default: what the project defines)
   --ci-services <list> service containers for the test job: ${dbIds().join(', ')}
-  --scan               scan the pushed image with Trivy (fails on HIGH/CRITICAL)
+  --scan               scan the image with Trivy before it is pushed (fails on HIGH/CRITICAL)
   --lint-dockerfile    lint the Dockerfile with Hadolint (fails on errors)
   --sbom               attach SBOM + provenance attestations to the image (GitHub)
   --sign               sign the pushed image with cosign, keyless (GitHub)
@@ -211,6 +212,7 @@ try {
       schedule: { type: 'string', multiple: true },
       concurrency: { type: 'string' },
       permissions: { type: 'string' },
+      'cloud-auth': { type: 'string' },
       'test-versions': { type: 'string' },
       'test-os': { type: 'string' },
       platforms: { type: 'string' },
@@ -299,6 +301,7 @@ try {
     schedule: values.schedule,
     concurrency: values.concurrency,
     permissions: csv(values.permissions),
+    cloudAuth: values['cloud-auth'],
     testVersions: csv(values['test-versions']),
     testOs: csv(values['test-os']),
     platforms: csv(values.platforms),

@@ -1,5 +1,6 @@
 import { block, changedLines, cmd, defaultBranch, deployPlan, dockerRunDeploy, isMulti, jobId, manualLabel, mapLines, q, scalar, serviceEnv, serviceUrl, shellPlan, x } from './common.js';
 import { DBS } from '../compose.js';
+import { VERSIONS } from '../tools.js';
 
 // Azure exposes its predefined variables to scripts as upper-case environment variables.
 const REF = [
@@ -154,7 +155,7 @@ function render(p) {
         timeout,
         '    steps:',
         '      - checkout: self',
-        ...p.apps.flatMap((app) => [`      - bash: docker run --rm -i hadolint/hadolint hadolint --failure-threshold error - < ${app.dir === '.' ? '' : `${app.dir}/`}Dockerfile`, `        displayName: ${q(`Hadolint${multi ? ` ${app.id}` : ''}`)}`]),
+        ...p.apps.flatMap((app) => [`      - bash: docker run --rm -i ${VERSIONS.hadolintPlain} hadolint --failure-threshold error - < ${app.dir === '.' ? '' : `${app.dir}/`}Dockerfile`, `        displayName: ${q(`Hadolint${multi ? ` ${app.id}` : ''}`)}`]),
       ]),
     );
   }
@@ -222,6 +223,8 @@ export const azure = {
   builtinRegistry: false,
   secretsLocation: 'Azure DevOps (Pipelines > Library or the pipeline variables; mark the secrets as secret)',
   features: ['prBranches', 'manual', 'schedule', 'paths', 'os', 'services', 'runner', 'timeout', 'tagFilters', 'branchIgnore'],
+  deploySecretsNote: ({ secrets, environments }) =>
+    `Keep ${secrets} as secret variables in a variable group (Pipelines > Library) open to this pipeline only, and add approvals and checks to the ${environments} environment (Pipelines > Environments): the deploy job waits for them before it runs.`,
   notes: () => [
     'Azure DevOps pull-request triggers apply to GitHub and Bitbucket repositories; for Azure Repos use a branch policy with this pipeline as the build validation.',
     'Azure DevOps has no run-cancellation setting in YAML, so the concurrency option is not applied.',

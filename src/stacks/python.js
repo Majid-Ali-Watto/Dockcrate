@@ -1,5 +1,6 @@
 import { lines } from '../fsutil.js';
-import { DEFAULT_BUILD, apt, envLines, healthcheck, pkgs, systemUser } from '../container.js';
+import { DEFAULT_BUILD, DEV_ROOT, apt, envLines, healthcheck, pkgs, runAsOf, systemUser, userLine } from '../container.js';
+import { VERSIONS } from '../tools.js';
 
 const SYNTAX = '# syntax=docker/dockerfile:1';
 const IGNORE = ['**/__pycache__', '*.pyc', '.venv', 'venv', '.pytest_cache', '.mypy_cache', '.ruff_cache'];
@@ -9,7 +10,7 @@ const mentions = (i, name) => new RegExp(`(^|[^\\w-])${name}([^\\w-]|$)`, 'm').t
 const INSTALL = {
   pip: ['COPY requirements.txt .', 'RUN pip install --no-cache-dir -r requirements.txt'],
   uv: [
-    'COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv',
+    `COPY --from=${VERSIONS.uv} /uv /usr/local/bin/uv`,
     'ENV UV_COMPILE_BYTECODE=1 PATH="/app/.venv/bin:$PATH"',
     'COPY pyproject.toml uv.lock ./',
     'RUN uv sync --frozen --no-dev --no-install-project',
@@ -24,7 +25,7 @@ const INSTALL = {
 
 const VENV = '/opt/venv';
 const ENV_PY = 'ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1';
-const UV = 'COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv';
+const UV = `COPY --from=${VERSIONS.uv} /uv /usr/local/bin/uv`;
 
 /** Compilers for packages that ship no wheel: kept out of the final image by the multi-stage build. */
 const compilers = (v) =>
@@ -70,13 +71,14 @@ const dockerfile = (i, port, c, cmd, b = DEFAULT_BUILD) => {
       pkgs(c, v),
       systemUser(v),
       `COPY --from=build ${VENV} ${VENV}`,
-      'COPY --chown=app:app . .',
-      'USER app',
+      // The code stays owned by root: the app can read it, not rewrite it.
+      'COPY . .',
+      userLine(),
       tail,
     );
   }
   const mixed = b.mode === 'mixed';
-  return lines(SYNTAX, image, ENV_PY, envLines(c), 'WORKDIR /app', mixed && compilers(v), pkgs(c, v), mixed ? DEV_INSTALL[i.pm] : INSTALL[i.pm], systemUser(v), 'COPY --chown=app:app . .', 'USER app', tail);
+  return lines(SYNTAX, image, ENV_PY, envLines(c), 'WORKDIR /app', mixed && compilers(v), pkgs(c, v), mixed ? DEV_INSTALL[i.pm] : INSTALL[i.pm], systemUser(v), 'COPY . .', userLine(), tail);
 };
 
 // Development image: same base, dev dependencies included, the source is bind mounted over /app and the server reloads.
@@ -89,6 +91,7 @@ const DEV_INSTALL = {
 const devImage = (i, port, c, cmd) => ({
   dockerfile: lines(
     SYNTAX,
+    DEV_ROOT,
     `FROM python:${i.version}-slim`,
     'ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1',
     envLines(c),
@@ -177,6 +180,7 @@ export const fastapi = {
   variants: ['alpine', 'slim'],
   defaultVariant: 'slim',
   healthKind: () => 'python',
+  runAs: () => runAsOf(10001),
   buildNotes: (i, b) => buildNotes(b),
   codeql: 'python',
   devcontainer: (i) => `mcr.microsoft.com/devcontainers/python:1-${i.version}`,
@@ -209,6 +213,7 @@ export const django = {
   variants: ['alpine', 'slim'],
   defaultVariant: 'slim',
   healthKind: () => 'python',
+  runAs: () => runAsOf(10001),
   buildNotes: (i, b) => buildNotes(b),
   codeql: 'python',
   devcontainer: (i) => `mcr.microsoft.com/devcontainers/python:1-${i.version}`,
@@ -228,6 +233,6 @@ export const django = {
     dockerfile(i, port, c, ['gunicorn', i.wsgi ?? 'config.wsgi:application', '--bind', `0.0.0.0:${port}`], b),
   ci: (i, v, selected) => ci(i, 'python manage.py test', selected, v),
   notes: (i) => [
-    'Set ALLOWED_HOSTS and SECRET_KEY from env; run migrations and collectstatic as a release step (or an entrypoint).',
+    'Set ALLOWED_HOSTS and SECRET_KEY from env; run migrations as a release step and collectstatic at build time (a RUN line in the Dockerfile): the code folder is read-only to the app user, so collectstatic and uploads (MEDIA_ROOT) cannot write there at runtime; keep media in object storage or a mounted volume.',
   ],
 };

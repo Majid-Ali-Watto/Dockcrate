@@ -18,6 +18,16 @@ export function appSlug(raw) {
 }
 
 const NAME = /^[a-z][a-z0-9-]*$/;
+
+/**
+ * True when one folder of a relative path is unsafe: `.git` in any case and with trailing dots or spaces (which Windows and
+ * some file systems drop: `.GIT`, `.git.`), its 8.3 short name, only dots, or a leading dash (read as an option by
+ * `docker build`, `cd`, ... in the generated scripts).
+ */
+export const unsafeSegment = (segment) => {
+  const s = segment.replace(/[. ]+$/, '').toLowerCase();
+  return s === '' || s === '.git' || /^git~\d+$/.test(s) || segment.startsWith('-');
+};
 const DIR = /^(\.|(?!.*\.\.)[\w.-]+(\/[\w.-]+)*)$/;
 
 export const cleanServiceDir = (dir) => String(dir ?? '.').trim().replace(/^\.\//, '').replace(/\/+$/, '') || '.';
@@ -40,6 +50,7 @@ export function normalizeServices(raw) {
     if (typeof svc !== 'object' || svc === null || Array.isArray(svc)) throw new Error(`service ${i + 1} must be an object`);
     const dir = cleanServiceDir(svc.dir ?? svc.name);
     if (!DIR.test(dir)) throw new Error(`invalid service folder "${svc.dir}": use a relative path inside the project`);
+    if (dir !== '.' && dir.split('/').some(unsafeSegment)) throw new Error(`invalid service folder "${svc.dir}": no .git folder, no folder of dots only and no name starting with a dash`);
     let name = svc.name ?? (dir === '.' ? 'app' : appSlug(basename(dir)));
     if (!NAME.test(name)) throw new Error(`invalid service name "${name}": lowercase letters, digits and dashes, starting with a letter`);
     if (!svc.name && taken.has(name)) name = appSlug(dir);

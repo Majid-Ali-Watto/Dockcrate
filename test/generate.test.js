@@ -24,11 +24,46 @@ test('compose wires databases with healthchecks, volumes and connection URLs', (
   const r = fresh({ stack: 'node', db: ['postgres', 'redis'], port: 4000 });
   const compose = file(r, 'docker-compose.yml');
   assert.match(compose, /- "4000:4000"/);
-  assert.match(compose, /DATABASE_URL: "postgres:\/\/app:\$\{DB_PASSWORD:-app\}@postgres:5432\/app"/);
-  assert.match(compose, /REDIS_URL: "redis:\/\/redis:6379"/);
+  assert.match(compose, /DATABASE_URL: "postgres:\/\/app:\$\{DB_PASSWORD:\?set DB_PASSWORD in \.env\}@postgres:5432\/app"/);
+  assert.match(compose, /REDIS_URL: "redis:\/\/:\$\{REDIS_PASSWORD:\?set REDIS_PASSWORD in \.env\}@redis:6379"/);
   assert.match(compose, /postgres:\n {8}condition: service_healthy/);
   assert.match(compose, /volumes:\n {2}postgres-data:\n {2}redis-data:/);
-  assert.match(file(r, '.env.example'), /DB_PASSWORD=/);
+  assert.match(file(r, '.env.example'), /^DB_PASSWORD=change-me\nREDIS_PASSWORD=change-me$/m);
+});
+
+test('compose: no default passwords; every database and queue requires its own, Mongo, Redis and Elasticsearch included', () => {
+  const r = fresh({ stack: 'node', db: ['postgres', 'mysql', 'mongo', 'redis', 'elasticsearch', 'rabbitmq'] });
+  const compose = file(r, 'docker-compose.yml');
+  assert.doesNotMatch(compose, /:-app\}|guest|xpack\.security\.enabled: "false"/);
+  assert.match(compose, /POSTGRES_PASSWORD: "\$\{DB_PASSWORD:\?set DB_PASSWORD in \.env\}"/);
+  assert.match(compose, /MYSQL_ROOT_PASSWORD: "\$\{DB_ROOT_PASSWORD:\?set DB_ROOT_PASSWORD in \.env\}"/);
+  assert.match(compose, /MONGO_INITDB_ROOT_USERNAME: "app"\n {6}MONGO_INITDB_ROOT_PASSWORD: "\$\{MONGO_PASSWORD:\?/);
+  assert.match(compose, /MONGO_URL: "mongodb:\/\/app:\$\{MONGO_PASSWORD:\?set MONGO_PASSWORD in \.env\}@mongo:27017\/app\?authSource=admin"/);
+  assert.match(compose, /redis:\n {4}image: redis:7-alpine\n {4}command: \["redis-server","--requirepass","\$\{REDIS_PASSWORD:\?set REDIS_PASSWORD in \.env\}"\]/);
+  assert.match(compose, /REDISCLI_AUTH: "\$\{REDIS_PASSWORD:\?/);
+  assert.match(compose, /test: \["CMD-SHELL","redis-cli ping \| grep -q PONG"\]/);
+  assert.match(compose, /ELASTIC_PASSWORD: "\$\{ELASTIC_PASSWORD:\?/);
+  assert.match(compose, /curl -fs -u \\"elastic:\$\$ELASTIC_PASSWORD\\" http:\/\/localhost:9200\/_cluster\/health/);
+  const env = file(r, '.env.example');
+  for (const name of ['DB_PASSWORD', 'DB_ROOT_PASSWORD', 'MONGO_PASSWORD', 'REDIS_PASSWORD', 'ELASTIC_PASSWORD', 'RABBITMQ_PASSWORD']) assert.match(env, new RegExp(`^${name}=change-me$`, 'm'));
+  assert.match(env, /^# Copy to \.env \(never commit it\) and replace every value/);
+  // CI service containers get a fixed throwaway password; the CI redis has none (service containers cannot pass arguments).
+  const ci = r.files.find((f) => f.kind === 'ci').content;
+  assert.doesNotMatch(ci, /DB_PASSWORD/);
+  const services = fresh({ stack: 'node', ciServices: ['mysql', 'redis', 'elasticsearch', 'rabbitmq'] });
+  const sci = services.files.find((f) => f.kind === 'ci').content;
+  assert.match(sci, /MYSQL_ROOT_PASSWORD: "ci-test-only"/);
+  assert.match(sci, /RABBITMQ_DEFAULT_PASS: "ci-test-only"/);
+  assert.match(sci, /REDIS_URL: "redis:\/\/localhost:6379"/);
+  assert.doesNotMatch(sci, /REDISCLI_AUTH|\$\$|:\?set/);
+  assert.ok(services.notes.some((n) => /throwaway password "ci-test-only"/.test(n) && /redis has no password/.test(n)));
+});
+
+test('the dev override publishes database ports on 127.0.0.1 only', () => {
+  const dev = file(fresh({ stack: 'node', db: ['postgres', 'redis'], envs: ['dev'] }), 'docker-compose.dev.yml');
+  assert.match(dev, /postgres:\n {4}ports:\n {6}- "127\.0\.0\.1:5432:5432"/);
+  assert.match(dev, /redis:\n {4}ports:\n {6}- "127\.0\.0\.1:6379:6379"/);
+  assert.doesNotMatch(dev, /- "\d+:\d+"/);
 });
 
 test('compose output reuses the target folder\'s existing compose file name', () => {
@@ -166,11 +201,26 @@ test('test matrix: runtime versions and operating systems', () => {
   assert.match(gl, /- VERSION: \["20","22"\]/);
 });
 
-test('permissions: extras go top-level, id-token and packages only where needed', () => {
-  const { text } = ciOf({ permissions: ['pull-requests-write', 'id-token-write'] });
-  assert.match(text, /\npermissions:\n {2}contents: read\n {2}pull-requests: write\n\n/);
-  assert.match(text, /image:[\s\S]*permissions:[\s\S]*packages: write/);
+test('permissions: read-only by default; extras, id-token and packages only on the jobs that publish or deploy', () => {
+  const { r, text } = ciOf({ permissions: ['pull-requests-write', 'id-token-write'], deploy: 'ssh' });
+  assert.match(text, /\npermissions:\n {2}contents: read\n\n/);
+  assert.match(text, /\n {2}image:[\s\S]*permissions:\n {6}contents: read\n {6}pull-requests: write\n {6}packages: write\n/);
+  assert.match(text, /\n {2}deploy:[\s\S]*permissions:\n {6}contents: read\n {6}pull-requests: write\n/);
+  // The test job runs the pull request's code: it never gets more than the read-only default.
+  const testJob = text.slice(text.indexOf('\n  test:'), text.indexOf('\n  image:'));
+  assert.doesNotMatch(testJob, /permissions|pull-requests/);
   assert.doesNotMatch(text, /id-token/);
+  assert.ok(r.notes.some((n) => /pull-requests-write\) are granted to the image and deploy jobs only/.test(n)));
+});
+
+test('every checkout leaves no token behind (persist-credentials: false), on GitHub and Gitea', () => {
+  for (const ci of ['github', 'gitea']) {
+    const files = generate(null, { ci, deploy: 'ssh', lintDockerfile: true, codeScan: true, changedOnly: true, services: [{ name: 'api', dir: 'api', stack: 'node' }, { name: 'web', dir: 'web', stack: 'react' }] }).files.filter((f) => f.kind === 'ci');
+    const text = files.map((f) => f.content).join('\n');
+    const checkouts = [...text.matchAll(/uses: actions\/checkout@\S+.*\n((?: {8}.*\n)*)/g)];
+    assert.ok(checkouts.length >= 4, ci);
+    for (const [, rest] of checkouts) assert.match(rest, /persist-credentials: "false"/, ci);
+  }
 });
 
 test('platforms add QEMU and the platforms input', () => {
@@ -213,16 +263,27 @@ test('deploy job: environment, serialised concurrency, per-target secrets', () =
   assert.match(text, /IMAGE: "\$\{\{ needs.image.outputs.image \}\}"/);
 });
 
-test('OIDC: id-token permission switches cloud login from stored keys to federation', () => {
-  const keys = ciOf({ deploy: 'cloudrun' });
+test('OIDC by default on GitHub; cloudAuth keys switches to stored keys, and the id-token permission still forces OIDC', () => {
+  const keys = ciOf({ deploy: 'cloudrun', cloudAuth: 'keys' });
   assert.match(keys.text, /credentials_json: "\$\{\{ secrets.GCP_SA_KEY \}\}"/);
   assert.doesNotMatch(keys.text, /id-token/);
-  const oidc = ciOf({ deploy: 'cloudrun', permissions: ['id-token-write'] });
-  assert.match(oidc.text, /workload_identity_provider/);
-  assert.match(oidc.text, /id-token: write/);
-  assert.doesNotMatch(oidc.text, /GCP_SA_KEY/);
-  assert.match(ciOf({ deploy: 'ecs', permissions: ['id-token-write'] }).text, /role-to-assume/);
-  assert.match(ciOf({ deploy: 'azure', permissions: ['id-token-write'] }).text, /client-id/);
+  assert.ok(keys.r.notes.some((n) => /stored long-lived key/.test(n)));
+  for (const oidc of [ciOf({ deploy: 'cloudrun' }), ciOf({ deploy: 'cloudrun', cloudAuth: 'keys', permissions: ['id-token-write'] })]) {
+    assert.match(oidc.text, /workload_identity_provider/);
+    assert.match(oidc.text, /id-token: write/);
+    assert.doesNotMatch(oidc.text, /GCP_SA_KEY/);
+  }
+  assert.ok(ciOf({ deploy: 'cloudrun' }).r.notes.some((n) => /Cloud login uses OIDC/.test(n)));
+  assert.ok(ciOf({ deploy: 'ecs' }).r.notes.some((n) => /^Add to GitHub.*AWS_ROLE_ARN/.test(n)));
+  assert.match(ciOf({ deploy: 'ecs' }).text, /role-to-assume/);
+  assert.match(ciOf({ deploy: 'azure' }).text, /client-id/);
+  assert.match(ciOf({ deploy: 'ecs', cloudAuth: 'keys' }).text, /aws-secret-access-key/);
+  assert.match(ciOf({ deploy: 'azure', cloudAuth: 'keys' }).text, /creds: "\$\{\{ secrets.AZURE_CREDENTIALS \}\}"/);
+  // Other providers keep stored keys; the option is GitHub's.
+  const gl = fresh({ stack: 'node', ci: 'gitlab', deploy: 'cloudrun' });
+  assert.ok(gl.notes.some((n) => /GCP_SA_KEY/.test(n)));
+  assert.ok(gl.notes.some((n) => /OIDC login is GitHub-only/.test(n)));
+  assert.throws(() => ciOf({ deploy: 'cloudrun', cloudAuth: 'password' }), /invalid cloud auth/);
 });
 
 test('registry follows the target: Artifact Registry, ECR, ACR, GHCR', () => {
@@ -346,11 +407,12 @@ test('CI service containers: GitHub services + localhost URLs, GitLab services +
   assert.match(ci, /"5432:5432"/);
   assert.match(ci, /--health-cmd \\"pg_isready -U app -d app\\"/);
   assert.match(ci, /--health-cmd \\"mongosh --quiet --eval 1\\"/);
-  assert.match(ci, /DATABASE_URL: "postgres:\/\/app:app@localhost:5432\/app"/);
-  assert.match(ci, /MONGO_URL: "mongodb:\/\/localhost:27017\/app"/);
+  assert.match(ci, /DATABASE_URL: "postgres:\/\/app:ci-test-only@localhost:5432\/app"/);
+  assert.match(ci, /MONGO_URL: "mongodb:\/\/app:ci-test-only@localhost:27017\/app\?authSource=admin"/);
+  assert.match(ci, /MONGO_INITDB_ROOT_PASSWORD: "ci-test-only"/);
   const gl = generate(null, { stack: 'node', ci: 'gitlab', ciServices: ['postgres', 'redis'] }).files.find((f) => f.kind === 'ci').content;
   assert.match(gl, /services:\n {4}- name: postgres:17-alpine\n {6}alias: postgres/);
-  assert.match(gl, /DATABASE_URL: "postgres:\/\/app:app@postgres:5432\/app"/);
+  assert.match(gl, /DATABASE_URL: "postgres:\/\/app:ci-test-only@postgres:5432\/app"/);
   assert.match(gl, /REDIS_URL: "redis:\/\/redis:6379"/);
   assert.throws(() => stepsOf({ stack: 'node', ciServices: ['postgres'], testOs: ['windows-latest'] }), /need Linux runners/);
   assert.throws(() => stepsOf({ stack: 'node', ciServices: ['oracle'] }), /invalid CI service/);
@@ -381,7 +443,7 @@ test('container options: healthcheck per base image', () => {
 });
 
 test('container options: OS packages use apk on alpine and apt on debian/ubuntu images', () => {
-  assert.match(stepsOf({ stack: 'node', packages: ['curl', 'tini'] }).df, /FROM base AS runtime[\s\S]*RUN apk add --no-cache curl tini\nCOPY --from=build/);
+  assert.match(stepsOf({ stack: 'node', packages: ['curl', 'tini'] }).df, /FROM base AS runtime[\s\S]*RUN apk add --no-cache curl tini\n# The code[^\n]*\nCOPY --from=build/);
   assert.match(stepsOf({ stack: 'fastapi', packages: ['libpq5'] }).df, /RUN apt-get update \\\n {4}&& apt-get install -y --no-install-recommends libpq5 \\\n {4}&& rm -rf \/var\/lib\/apt\/lists\/\*/);
   assert.match(stepsOf({ stack: 'java', packages: ['tzdata'] }).df, /apt-get install -y --no-install-recommends tzdata/);
   const spa = stepsOf({ stack: 'react', packages: ['curl'] });
@@ -412,7 +474,8 @@ test('container options: build args flow to Dockerfile, compose and CI', () => {
 
 test('rabbitmq is a compose service with an AMQP URL', () => {
   const r = fresh({ stack: 'node', db: ['rabbitmq'] });
-  assert.match(file(r, 'docker-compose.yml'), /AMQP_URL: "amqp:\/\/app:\$\{DB_PASSWORD:-app\}@rabbitmq:5672"/);
+  assert.match(file(r, 'docker-compose.yml'), /AMQP_URL: "amqp:\/\/app:\$\{RABBITMQ_PASSWORD:\?set RABBITMQ_PASSWORD in \.env\}@rabbitmq:5672"/);
+  assert.match(file(r, 'docker-compose.yml'), /RABBITMQ_DEFAULT_PASS: "\$\{RABBITMQ_PASSWORD:\?/);
   assert.match(file(r, 'docker-compose.yml'), /rabbitmq-diagnostics/);
 });
 
@@ -429,8 +492,9 @@ test('go: a static binary in alpine, the main package at the root', () => {
   assert.match(df, /FROM golang:1\.25-alpine AS build/);
   assert.match(df, /CGO_ENABLED=0 go build .* -o \/out\/app \./);
   assert.match(df, /FROM alpine:3 AS runtime/);
+  assert.match(df, /RUN addgroup -S -g 10001 app && adduser -S -u 10001 -G app app/);
   assert.match(df, /RUN apk add --no-cache curl/);
-  assert.match(df, /USER app/);
+  assert.match(df, /USER 10001:10001/);
   assert.match(df, /HEALTHCHECK .* wget -qO \/dev\/null http:\/\/127\.0\.0\.1:8080\/health/);
   assert.match(file(fresh({ stack: 'go', runtime: '1.23' }), 'Dockerfile'), /FROM golang:1\.23-alpine AS build/);
   assert.match(file(r, '.github/workflows/ci.yml'), /actions\/setup-go@[0-9a-f]{40} # v5/);
@@ -451,9 +515,12 @@ test('rust: the crate name and a locked build drive the Dockerfile', () => {
 test('mariadb, memcached, elasticsearch and mailpit are compose services; stateless ones get no volume', () => {
   const r = fresh({ stack: 'node', db: ['mariadb', 'memcached', 'elasticsearch', 'mailpit'] });
   const compose = file(r, 'docker-compose.yml');
-  assert.match(compose, /DATABASE_URL: "mysql:\/\/app:\$\{DB_PASSWORD:-app\}@mariadb:3306\/app"/);
+  assert.match(compose, /DATABASE_URL: "mysql:\/\/app:\$\{DB_PASSWORD:\?set DB_PASSWORD in \.env\}@mariadb:3306\/app"/);
   assert.match(compose, /MEMCACHED_URL: "memcached:11211"/);
-  assert.match(compose, /ELASTICSEARCH_URL: "http:\/\/elasticsearch:9200"/);
+  assert.match(compose, /ELASTICSEARCH_URL: "http:\/\/elastic:\$\{ELASTIC_PASSWORD:\?set ELASTIC_PASSWORD in \.env\}@elasticsearch:9200"/);
+  assert.match(compose, /xpack\.security\.enabled: "true"/);
+  assert.doesNotMatch(compose, /xpack\.security\.enabled: "false"/);
+  assert.match(compose, /DB_ROOT_PASSWORD/);
   assert.match(compose, /SMTP_URL: "smtp:\/\/mailpit:1025"/);
   assert.match(compose, /volumes:\n {2}mariadb-data:\n {2}elasticsearch-data:\n?$/);
   assert.doesNotMatch(compose, /memcached-data|mailpit-data/);
@@ -465,12 +532,12 @@ test('mariadb, memcached, elasticsearch and mailpit are compose services; statel
 
 test('several SQL engines: the first keeps DATABASE_URL, the others get their own variable', () => {
   const compose = file(fresh({ stack: 'node', db: ['postgres', 'mariadb'] }), 'docker-compose.yml');
-  assert.match(compose, /DATABASE_URL: "postgres:\/\/app:\$\{DB_PASSWORD:-app\}@postgres:5432\/app"/);
-  assert.match(compose, /MARIADB_URL: "mysql:\/\/app:\$\{DB_PASSWORD:-app\}@mariadb:3306\/app"/);
+  assert.match(compose, /DATABASE_URL: "postgres:\/\/app:\$\{DB_PASSWORD:\?set DB_PASSWORD in \.env\}@postgres:5432\/app"/);
+  assert.match(compose, /MARIADB_URL: "mysql:\/\/app:\$\{DB_PASSWORD:\?set DB_PASSWORD in \.env\}@mariadb:3306\/app"/);
   assert.equal(compose.match(/DATABASE_URL/g).length, 1);
   const ci = stepsOf({ stack: 'node', ciServices: ['mysql', 'postgres'] }).ci;
-  assert.match(ci, /DATABASE_URL: "mysql:\/\/app:app@localhost:3306\/app"/);
-  assert.match(ci, /POSTGRES_URL: "postgres:\/\/app:app@localhost:5432\/app"/);
+  assert.match(ci, /DATABASE_URL: "mysql:\/\/app:ci-test-only@localhost:3306\/app"/);
+  assert.match(ci, /POSTGRES_URL: "postgres:\/\/app:ci-test-only@localhost:5432\/app"/);
 });
 
 // ------------------------------------------------------------------- supply chain and security
@@ -508,7 +575,7 @@ test('GitLab: hadolint job and SAST template; SBOM and signing are dropped with 
   const r = fresh({ stack: 'node', ci: 'gitlab', lintDockerfile: true, codeScan: true, sbom: true, sign: true });
   const gl = r.files.find((f) => f.kind === 'ci').content;
   assert.match(gl, /^include:\n {2}- template: Security\/SAST\.gitlab-ci\.yml/);
-  assert.match(gl, /lint-dockerfile:\n {2}stage: test\n {2}image: hadolint\/hadolint:latest-debian/);
+  assert.match(gl, /lint-dockerfile:\n {2}stage: test\n {2}image: hadolint\/hadolint:v2\.15\.1-debian/);
   assert.match(gl, /hadolint --failure-threshold error Dockerfile/);
   assert.doesNotMatch(gl, /cosign|sbom/);
   assert.ok(r.notes.some((n) => /SBOM and provenance attestations is not supported by GitLab CI/.test(n)));
@@ -535,7 +602,10 @@ test('extras are opt-in: dependabot, dev container, Makefile, editorconfig', () 
   const r = fresh({ stack: 'go', name: 'svc', extras: ['dependabot', 'devcontainer', 'makefile', 'editorconfig'] });
   assert.deepEqual(r.files.filter((f) => f.kind === 'repo').map((f) => f.path), ['.github/dependabot.yml', '.devcontainer/devcontainer.json', 'Makefile', '.editorconfig']);
   assert.match(file(r, '.github/dependabot.yml'), /package-ecosystem: gomod[\s\S]*package-ecosystem: docker[\s\S]*package-ecosystem: github-actions/);
-  const dev = JSON.parse(file(r, '.devcontainer/devcontainer.json'));
+  const devText = file(r, '.devcontainer/devcontainer.json');
+  assert.match(devText, /\n {2}\/\/ docker-in-docker runs this container privileged[^\n]*\n {2}"features"/);
+  assert.ok(r.notes.some((n) => /docker-in-docker, which runs it privileged/.test(n)));
+  const dev = JSON.parse(devText.replace(/^\s*\/\/.*$/gm, ''));
   assert.equal(dev.image, 'mcr.microsoft.com/devcontainers/go:1-1.25');
   assert.deepEqual(dev.forwardPorts, [8080]);
   assert.match(file(r, 'Makefile'), /^up:\n\tdocker compose -f docker-compose\.yml up --build -d$/m);
@@ -562,7 +632,9 @@ test('php: apache runs unprivileged on the chosen port, composer in a vendor sta
   assert.match(df, /composer install --no-dev .*--ignore-platform-reqs/);
   assert.match(df, /s!\/var\/www\/html!\/var\/www\/html\/public!g/);
   assert.match(df, /Listen 8080/);
-  assert.match(df, /USER www-data/);
+  assert.match(df, /USER 33:33/);
+  assert.doesNotMatch(df, /--chown/);
+  assert.match(df, /for d in storage bootstrap\/cache; do if \[ -d "\$d" \]; then chown -R www-data:www-data "\$d"; fi; done/);
   assert.match(df, /CMD curl -fsS -o \/dev\/null http:\/\/127\.0\.0\.1:8080\/up \|\| exit 1/);
   const ci = file(r, '.github/workflows/ci.yml');
   assert.match(ci, /shivammathur\/setup-php@[0-9a-f]{40} # v2/);
@@ -578,7 +650,9 @@ test('ruby: a Rails server with native gem libraries on request', () => {
   assert.match(df, /FROM ruby:3\.3-slim AS build/);
   assert.match(df, /apt-get install -y --no-install-recommends tzdata/);
   assert.match(df, /CMD \["bundle","exec","rails","server","-b","0.0.0.0","-p","3000"\]/);
-  assert.match(df, /USER app/);
+  assert.match(df, /USER 10001:10001/);
+  assert.match(df, /COPY --from=build \/app \.\/\nRUN mkdir -p tmp log storage && chown -R app:app tmp log storage\nUSER 10001:10001/);
+  assert.match(df, /groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app --create-home app/);
   assert.match(file(r, '.github/workflows/ci.yml'), /run: bin\/rails test|run: bundle exec rspec/);
   assert.match(file(fresh({ stack: 'ruby' }), 'Dockerfile'), /FROM ruby:3\.4-slim AS build/);
   const hc = fresh({ stack: 'ruby', healthcheck: '/up' });
@@ -590,9 +664,9 @@ test('every registry can be chosen for the registry target, on both providers, w
     dockerhub: [/DOCKERHUB_USERNAME/, /secrets DOCKERHUB_TOKEN; variables DOCKERHUB_USERNAME/],
     quay: [/quay\.io\/\$\{\{ vars\.QUAY_NAMESPACE \}\}\/app/, /secrets QUAY_PASSWORD; variables QUAY_USERNAME, QUAY_NAMESPACE/],
     custom: [/\$\{\{ vars\.REGISTRY_HOST \}\}\/\$\{\{ vars\.REGISTRY_NAMESPACE \}\}\/app/, /secrets REGISTRY_PASSWORD; variables REGISTRY_HOST, REGISTRY_NAMESPACE, REGISTRY_USERNAME/],
-    gar: [/-docker\.pkg\.dev/, /secrets GCP_SA_KEY; variables GCP_PROJECT, GCP_REGION, GAR_REPO\./],
-    ecr: [/amazonaws\.com/, /secrets AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY; variables AWS_REGION, AWS_ACCOUNT_ID, ECR_REPOSITORY\./],
-    acr: [/azurecr\.io\/app/, /secrets AZURE_CREDENTIALS; variables ACR_NAME\./],
+    gar: [/-docker\.pkg\.dev/, /variables GCP_PROJECT, GCP_REGION, GAR_REPO, GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT\./],
+    ecr: [/amazonaws\.com/, /variables AWS_REGION, AWS_ACCOUNT_ID, ECR_REPOSITORY, AWS_ROLE_ARN\./],
+    acr: [/azurecr\.io\/app/, /variables ACR_NAME, AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID\./],
   };
   for (const [registry, [image, note]] of Object.entries(expected)) {
     const gh = fresh({ stack: 'node', registry });
@@ -643,14 +717,20 @@ test('every CI provider renders, with its own file name', () => {
   assert.throws(() => fresh({ stack: 'node', ci: 'jenkins' , registry: 'builtin' }), /Jenkins has no built-in container registry/);
 });
 
-test('jenkins: docker agents, credentials for secrets, services on the host network, deploy rule', () => {
+test('jenkins: docker agents, credentials for secrets, services on a network of the build, deploy rule', () => {
   const r = fresh({ stack: 'node', ci: 'jenkins', registry: 'dockerhub', deploy: 'ssh', deployOn: 'manual', testVersions: ['20', '22'], ciServices: ['postgres'], schedule: '0 3 * * 1', timeout: 20, runner: 'linux' });
   const j = r.files.find((f) => f.kind === 'ci').content;
   assert.match(j, /cron\('0 3 \* \* 1'\)/);
   assert.match(j, /timeout\(time: 20, unit: 'MINUTES'\)/);
-  assert.match(j, /stage\('Test 20'\)[\s\S]*docker\.image\('node:20'\)\.inside\('--network host'\)/);
+  assert.match(j, /stage\('Test 20'\)[\s\S]*docker\.image\('node:20'\)\.inside\("--network dockcrate-\$\{env\.BUILD_TAG\}"\)/);
+  assert.doesNotMatch(j, /--network host/);
+  assert.match(j, /docker network create "dockcrate-\$BUILD_TAG"/);
+  assert.match(j, /DATABASE_URL = 'postgres:\/\/app:ci-test-only@postgres:5432\/app'/);
+  assert.match(j, /docker network rm "dockcrate-\$BUILD_TAG"/);
+  assert.match(fresh({ stack: 'node', ci: 'jenkins' }).files.find((f) => f.kind === 'ci').content, /docker\.image\('node:24'\)\.inside \{/);
+  assert.ok(r.notes.some((n) => /dedicated agent/.test(n) && /Docker socket/.test(n)));
   assert.match(j, /stage\('Test 22'\)/);
-  assert.match(j, /docker run -d --name "dockcrate-\$BUILD_TAG-postgres" --network host/);
+  assert.match(j, /docker run -d --name "dockcrate-\$BUILD_TAG-postgres" --network "dockcrate-\$BUILD_TAG" --network-alias postgres/);
   assert.match(j, /DOCKERHUB_TOKEN = credentials\('DOCKERHUB_TOKEN'\)/);
   assert.match(j, /when \{ beforeAgent true; not \{ changeRequest\(\) \} \}/);
   assert.match(j, /agent \{\n {8}docker \{ image 'docker:27-cli'; label 'linux'/);
@@ -729,7 +809,8 @@ test('pipeline options: name, runner, timeout, env, token permissions, fail-fast
   assert.doesNotMatch(t, /type=ref,event=branch/);
   assert.doesNotMatch(t, /cache-from|cache: /);
   assert.match(t, /severity: "MEDIUM,HIGH,CRITICAL"/);
-  assert.match(t, /\npermissions:\n {2}contents: write\n {2}issues: read\n {2}checks: write\n/);
+  assert.match(t, /\npermissions:\n {2}contents: read\n\n/);
+  assert.match(t, /\n {2}image:[\s\S]*permissions:\n {6}contents: write\n {6}issues: read\n {6}checks: write\n {4}outputs:/);
   assert.throws(() => ciText({ imageTags: ['nope'] }), /invalid image tag/);
   assert.throws(() => ciText({ timeout: 5000 }), /invalid timeout/);
   assert.throws(() => ciText({ pipelineEnv: ['bad'] }), /invalid pipeline variable/);
@@ -799,11 +880,68 @@ test('GitHub actions are pinned to full commit SHAs with the tag as a comment, b
   }
 });
 
-test('--no-pin-actions keeps tags; Gitea never pins (its runners may not resolve SHAs)', () => {
+test('--no-pin-actions keeps tags; Gitea pins like GitHub', () => {
   const tags = usesOf(everything({ pinActions: false }));
   assert.ok(tags.every(({ ref }) => /@[\w.]+$/.test(ref) && !/@[0-9a-f]{40}$/.test(ref)));
   const gitea = usesOf(everything({ ci: 'gitea', sbom: false, sign: false, codeScan: false }));
-  assert.ok(gitea.length > 0 && gitea.every(({ ref }) => !/@[0-9a-f]{40}$/.test(ref)));
+  assert.ok(gitea.length > 0 && gitea.every(({ ref }) => /@[0-9a-f]{40}$/.test(ref)));
+  assert.ok(usesOf(everything({ ci: 'gitea', pinActions: false })).every(({ ref }) => !/@[0-9a-f]{40}$/.test(ref)));
+});
+
+test('every action any stack, target or option emits on GitHub and Gitea is pinned to a full commit SHA', () => {
+  const stacks = ['node', 'react', 'fastapi', 'django', 'go', 'rust', 'java', 'dotnet', 'php', 'ruby'];
+  const deploys = ['registry', 'ssh', 'kubernetes', 'cloudrun', 'ecs', 'azure', 'fly'];
+  const seen = new Set();
+  for (const ci of ['github', 'gitea']) {
+    for (const stack of stacks) {
+      for (const deploy of deploys) {
+        const files = generate(null, {
+          stack, ci, deploy, scan: true, lintDockerfile: true, sbom: true, sign: true, codeScan: true, platforms: ['linux/amd64', 'linux/arm64'],
+          ciSteps: undefined, manual: true, changedOnly: false,
+        }).files.filter((f) => f.kind === 'ci');
+        for (const { ref, comment } of usesOf(files)) {
+          seen.add(ref.replace(/@.*/, ''));
+          assert.match(ref, /@[0-9a-f]{40}$/, `${ci} ${stack} ${deploy}: ${ref} is not pinned`);
+          assert.match(comment, /^# \S+$/);
+        }
+      }
+    }
+  }
+  assert.ok(seen.has('superfly/flyctl-actions/setup-flyctl') && seen.has('dtolnay/rust-toolchain') && seen.has('aquasecurity/trivy-action'));
+});
+
+test('GitHub builds and scans the image before it pushes and signs it; a multi-platform build scans one platform', () => {
+  const { text } = ciOf({ scan: true, sign: true, sbom: true, platforms: ['linux/amd64', 'linux/arm64'] });
+  const at = (re) => text.search(re);
+  const load = at(/load: "true"/);
+  const scan = at(/uses: aquasecurity\/trivy-action/);
+  const push = at(/push: "true"/);
+  const sign = at(/cosign sign --yes/);
+  assert.ok(load > 0 && load < scan && scan < push && push < sign, 'build+load, scan, push, sign');
+  assert.match(text, /load: "true"\n {10}push: "false"\n {10}provenance: "false"/);
+  assert.match(text.slice(load - 200, load), /platforms: "linux\/amd64"\n/);
+  assert.match(text.slice(scan, push + 400), /platforms: "linux\/amd64,linux\/arm64"/);
+  // Pull requests build and scan, but nothing is pushed or signed for them.
+  assert.match(text.slice(scan, push), /id: build\n {8}if: "github.event_name != 'pull_request'"/);
+  assert.doesNotMatch(text.slice(load - 300, scan), /if: "github.event_name != 'pull_request'"/);
+  // Without a scan the single build pushes outside pull requests, as before.
+  const plain = ciOf({}).text;
+  assert.doesNotMatch(plain, /load: "true"/);
+  assert.match(plain, /push: "\$\{\{ github.event_name != 'pull_request' \}\}"/);
+});
+
+test('pipeline variables reach the shell literally on Bitbucket and CircleCI: no $(...), $VAR or backticks expand', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const value = 'a $(id) $HOME `uname` \'single\' "double" \\ end';
+  for (const ci of ['bitbucket', 'circleci']) {
+    const text = fresh({ stack: 'node', ci, pipelineEnv: [`TRICKY=${value}`] }).files.find((f) => f.kind === 'ci').content;
+    const line = text.split('\n').map((l) => l.trim().replace(/^- /, '')).find((l) => /^"?export TRICKY=/.test(l));
+    assert.ok(line, ci);
+    const command = line.startsWith('"') ? JSON.parse(line) : line;
+    assert.match(command, /^export TRICKY='/, ci);
+    const out = spawnSync('sh', ['-c', `${command}; printf '%s' "$TRICKY"`], { encoding: 'utf8' });
+    assert.equal(out.stdout, value, ci);
+  }
 });
 
 test('Trivy is never emitted at a version from the March 2026 compromise (trivy-action 0.0.1-0.34.2, image 0.69.4+, latest)', () => {
@@ -839,4 +977,137 @@ test('kubernetes with compose services warns that the services are not deployed'
   const r = fresh({ stack: 'node', name: 'Shop', deploy: 'kubernetes', db: ['postgres', 'redis'] });
   assert.ok(r.notes.some((n) => /postgres, redis/.test(n) && /shop-env/.test(n)));
   assert.ok(!fresh({ stack: 'node', deploy: 'kubernetes' }).notes.some((n) => /compose services/.test(n)));
+});
+
+// ---- no movable references to third-party tools
+
+/** Splits a shell command line into words, keeping quoted parts together. */
+const words = (line) => [...line.matchAll(/"[^"]*"|'[^']*'|\S+/g)].map((m) => m[0]);
+/** The image a `docker run ...` line runs: the first word after the options. */
+function dockerRunImage(line) {
+  const ws = words(line.slice(line.indexOf('docker run ') + 'docker run '.length));
+  for (let i = 0; i < ws.length; i += 1) {
+    const w = ws[i];
+    if (['--rm', '-i', '-d', '-t', '-it'].includes(w)) continue;
+    if (w.startsWith('-')) {
+      if (!w.includes('=')) i += 1;
+      continue;
+    }
+    return w;
+  }
+  return null;
+}
+
+/** Every image or tool reference a generated file names, with what it is. */
+function references(content) {
+  const stages = new Set([...content.matchAll(/ AS (\w+)/g)].map((m) => m[1]));
+  const refs = [
+    ...[...content.matchAll(/^[ \t]*(?:- )?image:[ \t]+['"]?([^\s'"{}]+)/gm)].map((m) => m[1]),
+    ...[...content.matchAll(/image:\n\s+name:\s+(\S+)/g)].map((m) => m[1]),
+    ...[...content.matchAll(/^FROM[ \t]+(\S+)/gm)].map((m) => m[1]),
+    ...[...content.matchAll(/--from=(\S+)/g)].map((m) => m[1]),
+    ...[...content.matchAll(/docker\.image\('([^']+)'\)|docker \{ image '([^']+)'/g)].map((m) => m[1] ?? m[2]),
+    ...content.split('\n').filter((l) => /docker run /.test(l)).map(dockerRunImage),
+    ...[...content.matchAll(/^\s*"image":\s*"([^"]+)"/gm)].map((m) => m[1]),
+  ];
+  return refs.filter((r) => r && !stages.has(r) && !/^(IMAGE_PLACEHOLDER|\$|<<)/.test(r) && !r.includes('$'));
+}
+
+test('no generated file names a tool by a movable reference (latest, a branch, or no tag at all)', () => {
+  const outputs = [];
+  const stacks = ['node', 'react', 'fastapi', 'django', 'go', 'rust', 'java', 'dotnet', 'php', 'ruby'];
+  const providers = ['github', 'gitlab', 'gitea', 'jenkins', 'bitbucket', 'azure', 'circleci'];
+  const deploys = ['registry', 'ssh', 'kubernetes', 'cloudrun', 'ecs', 'azure', 'fly'];
+  for (const ci of providers) {
+    for (const deploy of deploys) {
+      for (const stack of stacks) {
+        for (const extra of [{}, { multistage: false }, { multistage: false, stageMode: 'mixed' }, { imageVariant: 'slim' }, { imageVariant: 'alpine' }]) {
+          const registry = ['github', 'gitlab'].includes(ci) || ['cloudrun', 'ecs', 'azure', 'fly'].includes(deploy) ? undefined : 'dockerhub';
+          const r = generate(null, {
+            stack, ci, deploy, registry, scan: true, lintDockerfile: true, codeScan: true, envs: ['dev'], ciServices: ci === 'circleci' ? [] : ['postgres'],
+            extras: ['makefile', 'devcontainer', 'dependabot'], ciSteps: undefined, tool: undefined, ...extra,
+          });
+          outputs.push(...r.files);
+        }
+      }
+    }
+    const several = generate(null, { ci, deploy: 'ssh', registry: ['github', 'gitlab'].includes(ci) ? undefined : 'dockerhub', changedOnly: true, services: [{ name: 'api', dir: 'api', stack: 'fastapi', tool: 'uv', ciSteps: ['lint', 'test', 'audit'] }, { name: 'svc', dir: 'svc', stack: 'go', ciSteps: ['audit'] }] });
+    outputs.push(...several.files);
+  }
+  outputs.push(...generate(null, { stack: 'php', ci: 'none' }).files, ...generate(null, { stack: 'fastapi', tool: 'uv', ci: 'none', envs: ['dev'] }).files);
+  const text = outputs.map((f) => f.content).join('\n');
+  // The project's own image may carry a `latest` tag (an option); nothing third-party may.
+  assert.doesNotMatch(text.replace(/"\$IMAGE_REPO:latest"/g, ''), /:latest\b/);
+  assert.doesNotMatch(text, /@(latest|master|main)\b/);
+  const checked = new Set();
+  for (const f of outputs) {
+    for (const ref of references(f.content)) {
+      checked.add(ref);
+      const name = ref.replace(/@sha256:[0-9a-f]+$/, '');
+      const tag = name.includes(':') && name.lastIndexOf(':') > name.lastIndexOf('/') ? name.slice(name.lastIndexOf(':') + 1) : null;
+      assert.ok(tag || ref.includes('@sha256:'), `${f.path}: ${ref} has no tag`);
+      assert.ok(!['latest', 'stable', 'current', 'edge', 'master', 'main', 'alpine', 'slim', 'bookworm'].includes(tag), `${f.path}: ${ref} is a movable tag`);
+    }
+  }
+  for (const tool of ['hadolint/hadolint:v2.15.1-debian', 'amazon/aws-cli:2.38.1', 'mcr.microsoft.com/azure-cli:2.91.0', 'flyio/flyctl:v0.4.118', 'google/cloud-sdk:589.0.0-slim', 'alpine:3.24', 'ghcr.io/astral-sh/uv:0.13.1', 'ghcr.io/mlocati/php-extension-installer:2.12.1', 'aquasec/trivy:0.69.3', 'nginxinc/nginx-unprivileged:1.30-alpine', 'cimg/base:2026.10', 'ubuntu-2204:2026.05.1']) {
+    assert.ok(checked.has(tool), `${tool} is among the checked references`);
+  }
+  assert.match(text, /go install golang\.org\/x\/vuln\/cmd\/govulncheck@v\d+\.\d+\.\d+/);
+  assert.match(text, /setup-flyctl@[0-9a-f]{40} # 1\.5\n {8}with:\n {10}version: "0\.4\.118"/);
+});
+
+test('kubernetes and ECS run the image as its numeric non-root user; k8s with a read-only root and emptyDirs where it writes', () => {
+  const k8s = (opts) => generate(null, { deploy: 'kubernetes', ...opts }).files.find((f) => f.path === 'k8s/deployment.yaml').content;
+  const node = k8s({ stack: 'node' });
+  assert.match(node, /securityContext:\n {8}runAsNonRoot: true\n {8}runAsUser: 1000\n {8}runAsGroup: 1000\n {8}seccompProfile:/);
+  assert.match(node, /allowPrivilegeEscalation: false\n {12}readOnlyRootFilesystem: true/);
+  assert.match(node, /volumeMounts:\n {12}- name: tmp\n {14}mountPath: \/tmp\n {12}- name: home-node\n {14}mountPath: \/home\/node\n {12}- name: app-next-cache\n {14}mountPath: \/app\/\.next\/cache/);
+  assert.match(node, /\n {6}volumes:\n {8}- name: tmp\n {10}emptyDir: \{\}/);
+  assert.match(k8s({ stack: 'go' }), /runAsUser: 10001\n {8}runAsGroup: 10001/);
+  assert.match(k8s({ stack: 'react' }), /runAsUser: 101/);
+  assert.match(k8s({ stack: 'react', multistage: false, stageMode: 'mixed' }), /runAsUser: 1000\n/);
+  assert.match(k8s({ stack: 'dotnet' }), /runAsUser: 1654/);
+  assert.match(k8s({ stack: 'ruby' }), /mountPath: \/app\/tmp[\s\S]*mountPath: \/app\/log[\s\S]*mountPath: \/app\/storage/);
+  const php = k8s({ stack: 'php' });
+  assert.match(php, /runAsUser: 33/);
+  assert.match(php, /# readOnlyRootFilesystem is off: [^\n]*storage\/ and bootstrap\/cache[^\n]*\n {12}readOnlyRootFilesystem: false/);
+  const ecs = (stack) => JSON.parse(generate(null, { stack, deploy: 'ecs' }).files.find((f) => f.path === 'ecs/task-definition.json').content).containerDefinitions[0];
+  assert.equal(ecs('fastapi').user, '10001:10001');
+  assert.equal(ecs('node').user, '1000:1000');
+  assert.equal(ecs('fastapi').readonlyRootFilesystem, undefined);
+  assert.ok(generate(null, { stack: 'node', deploy: 'ecs' }).notes.some((n) => /readonlyRootFilesystem is left off/.test(n)));
+  // Several services: each manifest follows its own stack.
+  const multi = generate(null, { deploy: 'kubernetes', services: [{ name: 'api', dir: 'api', stack: 'go' }, { name: 'web', dir: 'web', stack: 'react' }] });
+  assert.match(multi.files.find((f) => f.path === 'k8s/api/deployment.yaml').content, /runAsUser: 10001/);
+  assert.match(multi.files.find((f) => f.path === 'k8s/web/deployment.yaml').content, /runAsUser: 101/);
+});
+
+test('the SSH deploy logs out of the registry on the server after the pull, and on failure', () => {
+  const text = ciOf({ deploy: 'ssh' }).text;
+  assert.match(text, /ssh "\$REMOTE" "trap 'docker logout \$REGISTRY >\/dev\/null' EXIT; docker login \$REGISTRY -u \$REGISTRY_USER --password-stdin && cd \$DEPLOY_PATH && APP_IMAGE=\$IMAGE docker compose pull && docker logout \$REGISTRY && APP_IMAGE=\$IMAGE docker compose up -d --remove-orphans"/);
+  for (const ci of ['gitlab', 'jenkins', 'bitbucket', 'azure', 'circleci']) {
+    const out = fresh({ stack: 'node', ci, deploy: 'ssh', registry: ci === 'gitlab' ? undefined : 'dockerhub' }).files.find((f) => f.kind === 'ci').content;
+    assert.match(out, /docker compose pull && docker logout \$REGISTRY && /, ci);
+  }
+});
+
+test('setup notes say where deploy secrets belong on each provider, and how to scope the kubeconfig', () => {
+  const where = {
+    github: /environment secrets of production[\s\S]*required reviewers/,
+    gitea: /no protected environments/,
+    gitlab: /Protected and Masked[\s\S]*environment scope to production/,
+    bitbucket: /secured deployment variables of production/,
+    azure: /variable group[\s\S]*approvals and checks to the production environment/,
+    jenkins: /credentials of this job's folder/,
+    circleci: /restricted context/,
+  };
+  for (const [ci, re] of Object.entries(where)) {
+    const r = fresh({ stack: 'node', ci, deploy: 'kubernetes', registry: ['github', 'gitlab'].includes(ci) ? undefined : 'dockerhub' });
+    assert.ok(r.notes.some((n) => n.includes('KUBE_CONFIG') && re.test(n)), ci);
+  }
+  const k8s = fresh({ stack: 'node', deploy: 'kubernetes' }).notes.find((n) => n.startsWith('Kubernetes:'));
+  assert.match(k8s, /ServiceAccount in the target namespace/);
+  assert.match(k8s, /Do not use your own ~\/\.kube\/config/);
+  // Cloud targets also sign in from the image job, so their keys are not deploy-only.
+  assert.ok(!fresh({ stack: 'node', deploy: 'cloudrun', cloudAuth: 'keys' }).notes.some((n) => /environment secrets of/.test(n)));
 });

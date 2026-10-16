@@ -1,4 +1,5 @@
 import { lines } from './fsutil.js';
+import { VERSIONS } from './tools.js';
 
 // GitHub Actions expression, kept out of template literals so `${{` stays readable.
 const x = (expr) => '${{ ' + expr + ' }}';
@@ -195,7 +196,13 @@ export const REGISTRIES = {
   },
 };
 
-const k8sDeployment = ({ appName, port, healthcheck = '', replicas = 2 }) => {
+/** A volume name for a writable folder: /app/tmp -> app-tmp. */
+const volumeName = (path) => path.replace(/^\//, '').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+
+const k8sDeployment = ({ appName, port, healthcheck = '', replicas = 2, runAs = null }) => {
+  // Without the stack's user (an image built elsewhere) the pod still refuses to run as root.
+  const readOnly = runAs ? runAs.readOnlyRoot : false;
+  const writable = runAs ? (readOnly ? runAs.writable : ['/tmp']) : [];
   // With a health path the probes hit it; otherwise they only check that the port accepts connections.
   const probe = (kind, delay, period) => [
     `          ${kind}Probe:`,
@@ -222,6 +229,8 @@ const k8sDeployment = ({ appName, port, healthcheck = '', replicas = 2 }) => {
     '    spec:',
     '      automountServiceAccountToken: false',
     '      securityContext:',
+    '        runAsNonRoot: true',
+    ...(runAs ? [`        runAsUser: ${runAs.uid}`, `        runAsGroup: ${runAs.gid}`] : []),
     '        seccompProfile:',
     '          type: RuntimeDefault',
     '      containers:',
@@ -239,14 +248,21 @@ const k8sDeployment = ({ appName, port, healthcheck = '', replicas = 2 }) => {
     probe('liveness', 15, 20),
     '          securityContext:',
     '            allowPrivilegeEscalation: false',
+    ...(readOnly
+      ? ['            readOnlyRootFilesystem: true']
+      : runAs
+        ? [`            # readOnlyRootFilesystem is off: ${runAs.why || 'the app writes inside its own folder'}.`, '            readOnlyRootFilesystem: false']
+        : []),
     '            capabilities:',
     '              drop: [ALL]',
+    ...(writable.length ? ['          # The folders the app writes to (the image itself is read-only).', '          volumeMounts:', ...writable.flatMap((path) => [`            - name: ${volumeName(path)}`, `              mountPath: ${path}`])] : []),
     '          resources:',
     '            requests:',
     '              cpu: 100m',
     '              memory: 128Mi',
     '            limits:',
     '              memory: 512Mi',
+    ...(writable.length ? ['      volumes:', ...writable.flatMap((path) => [`        - name: ${volumeName(path)}`, '          emptyDir: {}'])] : []),
   );
 };
 
@@ -264,7 +280,7 @@ const k8sService = ({ appName, port }) =>
     `      targetPort: ${port}`,
   );
 
-const ecsTaskDefinition = ({ appName, port }) =>
+const ecsTaskDefinition = ({ appName, port, runAs = null }) =>
   JSON.stringify(
     {
       family: appName,
@@ -278,6 +294,8 @@ const ecsTaskDefinition = ({ appName, port }) =>
           name: 'app',
           image: 'IMAGE_PLACEHOLDER',
           essential: true,
+          // The image's own non-root user, by number, so the task never falls back to root.
+          ...(runAs && { user: `${runAs.uid}:${runAs.gid}` }),
           portMappings: [{ containerPort: port, protocol: 'tcp' }],
           logConfiguration: {
             logDriver: 'awslogs',
@@ -326,7 +344,7 @@ export const TARGETS = {
       secrets: ['SSH_PRIVATE_KEY', 'SSH_KNOWN_HOSTS'],
       vars: ['SSH_HOST', 'SSH_USER', 'DEPLOY_PATH'],
     }),
-    shell: { image: 'alpine:3', setup: ['apk add --no-cache openssh-client'] },
+    shell: { image: VERSIONS.alpine, setup: ['apk add --no-cache openssh-client'] },
     script: (ctx) => {
       const { composeFile, composeFiles = [composeFile], apps } = ctx;
       const vars = apps.map((a) => `${a.composeImage}=$${a.imageEnv}`).join(' ');
@@ -343,12 +361,13 @@ export const TARGETS = {
         '# shellcheck disable=SC2029',
         'ssh "$REMOTE" "mkdir -p $DEPLOY_PATH"',
         ...composeFiles.map((f) => `scp ${f} "$REMOTE:$DEPLOY_PATH/${f}"`),
+        '# The registry login only lasts for the pull: docker logout removes the token from the server (the trap also on failure).',
         '# shellcheck disable=SC2029',
-        `printf '%s' "$REGISTRY_TOKEN" | ssh "$REMOTE" "docker login $REGISTRY -u $REGISTRY_USER --password-stdin && cd $DEPLOY_PATH && ${vars} docker compose${flags} pull${ctx.changedOnly ? ' $SERVICES' : ''} && ${vars} docker compose${flags} up -d --remove-orphans${ctx.changedOnly ? ' $SERVICES' : ''}"`,
+        `printf '%s' "$REGISTRY_TOKEN" | ssh "$REMOTE" "trap 'docker logout $REGISTRY >/dev/null' EXIT; docker login $REGISTRY -u $REGISTRY_USER --password-stdin && cd $DEPLOY_PATH && ${vars} docker compose${flags} pull${ctx.changedOnly ? ' $SERVICES' : ''} && docker logout $REGISTRY && ${vars} docker compose${flags} up -d --remove-orphans${ctx.changedOnly ? ' $SERVICES' : ''}"`,
       ];
     },
     notes: () => [
-      'SSH: get SSH_KNOWN_HOSTS with `ssh-keyscan -H <host>`; the server needs Docker with the compose plugin, and a .env next to the compose file if the app needs one.',
+      'SSH: get SSH_KNOWN_HOSTS with `ssh-keyscan -H <host>`; the server needs Docker with the compose plugin, and a .env next to the compose file with the passwords of .env.example (compose refuses to start without them) and whatever else the app needs. Use a deploy user in the docker group, not root; the registry token is removed from the server (docker logout) after each pull.',
     ],
   },
 
@@ -356,7 +375,7 @@ export const TARGETS = {
     label: 'Kubernetes (kubectl)',
     registry: 'builtin',
     needs: () => ({ secrets: ['KUBE_CONFIG'], vars: ['K8S_NAMESPACE?'] }),
-    shell: { image: 'alpine:3', setup: ['apk add --no-cache kubectl'] },
+    shell: { image: VERSIONS.alpine, setup: ['apk add --no-cache kubectl'] },
     script: (ctx) => [
       'set -eu',
       ...changedHead(ctx),
@@ -372,11 +391,11 @@ export const TARGETS = {
     ],
     files: ({ apps, replicas }) =>
       apps.flatMap((a) => [
-        { path: `${a.k8sDir}/deployment.yaml`, content: k8sDeployment({ appName: a.name, port: a.port, healthcheck: a.healthcheck, replicas }) },
+        { path: `${a.k8sDir}/deployment.yaml`, content: k8sDeployment({ appName: a.name, port: a.port, healthcheck: a.healthcheck, replicas, runAs: a.runAs }) },
         { path: `${a.k8sDir}/service.yaml`, content: k8sService({ appName: a.name, port: a.port }) },
       ]),
     notes: () => [
-      'Kubernetes: KUBE_CONFIG is your kubeconfig, base64-encoded (`base64 -w0 ~/.kube/config`). A private registry needs an imagePullSecret in the cluster; the Service is ClusterIP, so add an Ingress for public traffic. The pods read optional settings from a Secret named <app>-env (kubectl create secret generic <app>-env --from-literal=KEY=value).',
+      'Kubernetes: KUBE_CONFIG is a base64-encoded kubeconfig (`base64 -w0 deploy.kubeconfig`). Do not use your own ~/.kube/config (usually cluster-admin): create a ServiceAccount in the target namespace with a Role that can only manage Deployments and Services there, and a kubeconfig with its token. Pods run as the image\'s numeric non-root user with a read-only root file system (except PHP, where Laravel writes inside the app folder), writing only to emptyDir volumes (/tmp and the folders the app needs). A private registry needs an imagePullSecret in the cluster; the Service is ClusterIP, so add an Ingress for public traffic. The pods read optional settings from a Secret named <app>-env (kubectl create secret generic <app>-env --from-literal=KEY=value).',
     ],
   },
 
@@ -404,7 +423,7 @@ export const TARGETS = {
       prepare: [{ uses: 'google-github-actions/setup-gcloud@v2' }],
     },
     shell: {
-      image: 'google/cloud-sdk:slim',
+      image: VERSIONS.cloudSdk,
       setup: [
         'printf \'%s\' "$GCP_SA_KEY" > "$HOME/gcp-key.json"',
         'gcloud auth activate-service-account --key-file "$HOME/gcp-key.json"',
@@ -441,7 +460,7 @@ export const TARGETS = {
         },
       ],
     },
-    shell: { image: { name: 'amazon/aws-cli:latest', entrypoint: [''] }, setup: [] },
+    shell: { image: { name: VERSIONS.awsCli, entrypoint: [''] }, setup: [] },
     script: (ctx) => [
       'set -eu',
       ...changedHead(ctx),
@@ -458,9 +477,9 @@ export const TARGETS = {
       ...ctx.apps.flatMap((a) => gate(ctx, a, [`aws ecs wait services-stable --region "$AWS_REGION" --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE${a.suffix}"`])),
     ],
     multiNote: 'ECS: ECS_SERVICE is the name prefix; each service is deployed as <ECS_SERVICE>-<service>, with its own task definition under ecs/<service>/, and ECR repositories are <ECR_REPOSITORY>/<service>.',
-    files: ({ apps }) => apps.map((a) => ({ path: `${a.ecsDir}/task-definition.json`, content: ecsTaskDefinition({ appName: a.name, port: a.port }) })),
+    files: ({ apps }) => apps.map((a) => ({ path: `${a.ecsDir}/task-definition.json`, content: ecsTaskDefinition({ appName: a.name, port: a.port, runAs: a.runAs }) })),
     notes: () => [
-      'ECS: edit ecs/task-definition.json (executionRoleArn, awslogs-region, CPU/memory) and create the cluster, service and ECR repository first.',
+      'ECS: edit ecs/task-definition.json (executionRoleArn, awslogs-region, CPU/memory) and create the cluster, service and ECR repository first. The container runs as the image\'s numeric non-root user; readonlyRootFilesystem is left off because Fargate volumes are owned by root, so the app could not write /tmp: add one per writable folder if you turn it on.',
     ],
   },
 
@@ -484,7 +503,7 @@ export const TARGETS = {
       ],
     },
     shell: {
-      image: 'mcr.microsoft.com/azure-cli:latest',
+      image: VERSIONS.azureCli,
       setup: ['az login --service-principal -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID" > /dev/null'],
     },
     script: (ctx) => [
@@ -507,8 +526,8 @@ export const TARGETS = {
     label: 'Fly.io',
     registry: null,
     needs: () => ({ secrets: ['FLY_API_TOKEN'], vars: [] }),
-    github: { prepare: [{ uses: 'superfly/flyctl-actions/setup-flyctl@master' }] },
-    shell: { image: { name: 'flyio/flyctl:latest', entrypoint: [''] }, setup: [] },
+    github: { prepare: [{ uses: 'superfly/flyctl-actions/setup-flyctl@1.5', with: { version: VERSIONS.flyctlVersion } }] },
+    shell: { image: { name: VERSIONS.flyctl, entrypoint: [''] }, setup: [] },
     script: (ctx) => [
       ...changedHead(ctx),
       ...ctx.apps.flatMap((a) => gate(ctx, a, [a.dir === '.' ? 'flyctl deploy --remote-only' : `(cd ${a.dir} && flyctl deploy --remote-only)`])),

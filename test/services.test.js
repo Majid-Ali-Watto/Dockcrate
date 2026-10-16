@@ -264,7 +264,7 @@ test('dev environment: Dockerfile.dev per service, source mounted, databases pub
   assert.match(dev, /dockerfile: Dockerfile.dev/);
   assert.match(dev, /- \.\/api:\/app/);
   assert.match(dev, /- \/app\/node_modules/);
-  assert.match(dev, /postgres:\n {4}ports:\n {6}- "5432:5432"/);
+  assert.match(dev, /postgres:\n {4}ports:\n {6}- "127\.0\.0\.1:5432:5432"/);
   assert.match(file(r, 'api/Dockerfile.dev'), /"runserver","0\.0\.0\.0:8000"/);
   assert.match(file(r, 'web/Dockerfile.dev'), /"npm","run","dev","--","--host","0\.0\.0\.0","--port","8080"/);
   assert.match(file(r, 'api/.dockerignore'), /^Dockerfile\.\*$/m);
@@ -475,7 +475,7 @@ test('the other providers guard each service and deploy only what changed', () =
   const dir = fullstack();
   const guard = (id) => `case "$CHANGED" in *,all,*|*,${id},*) ;; *) echo "${id} is unchanged: nothing to do"; exit 0;; esac`;
   const gitlab = file(generate(dir, { ...changed, ci: 'gitlab' }), '.gitlab-ci.yml');
-  assert.match(gitlab, /^changes:\n {2}stage: \.pre\n {2}image: alpine:3\n {2}variables:\n {4}GIT_DEPTH: "0"/m);
+  assert.match(gitlab, /^changes:\n {2}stage: \.pre\n {2}image: alpine:3\.24\n {2}variables:\n {4}GIT_DEPTH: "0"/m);
   assert.match(gitlab, /dotenv: changed\.env/);
   assert.ok(gitlab.includes(`- ${JSON.stringify(guard('api'))}`.replace(/\\\\/g, '\\')) || gitlab.includes(guard('api').replace(/"/g, '\\"')), 'test job guard');
   assert.match(gitlab, /build-image-api:[\s\S]*before_script:\n {4}- "case[\s\S]*docker login|before_script:\n {4}- "case/);
@@ -580,32 +580,58 @@ test('database per service: URLs, init scripts and redis numbers', () => {
   assert.equal(shared.match(/@postgres:5432\/app"/g).length, 2, 'off by default: one shared database');
   const r = generate(dir, { db: ['postgres', 'redis'], dbPerService: true });
   const compose = file(r, 'docker-compose.yml');
-  assert.match(compose, /DATABASE_URL: "postgres:\/\/app:\$\{DB_PASSWORD:-app\}@postgres:5432\/api"/);
-  assert.match(compose, /@postgres:5432\/billing"/);
-  assert.match(compose, /REDIS_URL: "redis:\/\/redis:6379\/0"/);
-  assert.match(compose, /REDIS_URL: "redis:\/\/redis:6379\/1"/);
+  // Each service signs in as its own user, with its own password, to its own database.
+  assert.match(compose, /DATABASE_URL: "postgres:\/\/api:\$\{DB_PASSWORD_API:\?set DB_PASSWORD_API in \.env\}@postgres:5432\/api"/);
+  assert.match(compose, /DATABASE_URL: "postgres:\/\/billing:\$\{DB_PASSWORD_BILLING:\?set DB_PASSWORD_BILLING in \.env\}@postgres:5432\/billing"/);
+  assert.match(compose, /REDIS_URL: "redis:\/\/:\$\{REDIS_PASSWORD:\?set REDIS_PASSWORD in \.env\}@redis:6379\/0"/);
+  assert.match(compose, /REDIS_URL: "redis:\/\/:\$\{REDIS_PASSWORD:\?set REDIS_PASSWORD in \.env\}@redis:6379\/1"/);
+  // The database container gets the service passwords, for its init script only.
+  assert.match(compose, /POSTGRES_DB: "app"\n {6}DB_PASSWORD_API: "\$\{DB_PASSWORD_API:\?set DB_PASSWORD_API in \.env\}"\n {6}DB_PASSWORD_BILLING: /);
   assert.match(compose, /postgres-data:\/var\/lib\/postgresql\/data\n {6}- \.\/db\/postgres:\/docker-entrypoint-initdb\.d:ro/);
-  assert.equal(file(r, 'db/postgres/init.sql'), '-- One database per service. Runs once, when the data volume is first created.\nCREATE DATABASE api OWNER app;\nCREATE DATABASE billing OWNER app;\n');
-  assert.equal(file(r, 'db/redis/init.sql'), undefined, 'redis has numbered databases, nothing to create');
+  assert.equal(
+    file(r, 'db/postgres/init.sh'),
+    [
+      '# One database and one user per service, each with its own password (from the environment). Runs once, when the data volume is first created.',
+      'psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \\',
+      '  -v pw_api="$DB_PASSWORD_API" \\',
+      '  -v pw_billing="$DB_PASSWORD_BILLING" <<\'SQL\'',
+      'CREATE USER "api" WITH PASSWORD :\'pw_api\';',
+      'CREATE DATABASE "api" OWNER "api";',
+      'REVOKE ALL ON DATABASE "api" FROM PUBLIC;',
+      'CREATE USER "billing" WITH PASSWORD :\'pw_billing\';',
+      'CREATE DATABASE "billing" OWNER "billing";',
+      'REVOKE ALL ON DATABASE "billing" FROM PUBLIC;',
+      'SQL',
+      '',
+    ].join('\n'),
+  );
+  assert.equal(file(r, 'db/postgres/init.sql'), undefined);
+  assert.equal(file(r, 'db/redis/init.sh'), undefined, 'redis has numbered databases, nothing to create');
+  const env = file(r, '.env.example');
+  assert.match(env, /^DB_PASSWORD=change-me$/m);
+  assert.match(env, /^# One password per service database user\nDB_PASSWORD_API=change-me\nDB_PASSWORD_BILLING=change-me$/m);
   assert.ok(r.notes.some((n) => n.includes('api -> api') && n.includes('only runs when the data volume is first created')));
 });
 
 test('database per service: MySQL grants, MongoDB names, per-service lists, dashes', () => {
   const r = generate(null, { dbPerService: true, services: [svc('order-api', 'django', { db: ['mysql', 'mongo'] }), svc('billing', 'django', { db: ['mysql'] })] });
   const compose = file(r, 'docker-compose.yml');
-  assert.match(compose, /mysql:\/\/app:\$\{DB_PASSWORD:-app\}@mysql:3306\/order_api"/);
-  assert.match(compose, /MONGO_URL: "mongodb:\/\/mongo:27017\/order_api"/);
-  assert.equal(
-    file(r, 'db/mysql/init.sql'),
-    "-- One database per service. Runs once, when the data volume is first created.\nCREATE DATABASE IF NOT EXISTS `order_api`;\nGRANT ALL PRIVILEGES ON `order_api`.* TO 'app'@'%';\nCREATE DATABASE IF NOT EXISTS `billing`;\nGRANT ALL PRIVILEGES ON `billing`.* TO 'app'@'%';\n",
-  );
-  assert.equal(file(r, 'db/mongo/init.sql'), undefined);
+  assert.match(compose, /mysql:\/\/order_api:\$\{DB_PASSWORD_ORDER_API:\?set DB_PASSWORD_ORDER_API in \.env\}@mysql:3306\/order_api"/);
+  assert.match(compose, /MONGO_URL: "mongodb:\/\/order_api:\$\{MONGO_PASSWORD_ORDER_API:\?set MONGO_PASSWORD_ORDER_API in \.env\}@mongo:27017\/order_api"/);
+  assert.match(compose, /mongo-data:\/data\/db\n {6}- \.\/db\/mongo:\/docker-entrypoint-initdb\.d:ro/);
+  const mysql = file(r, 'db/mysql/init.sh');
+  assert.match(mysql, /^docker_process_sql <<SQL$/m);
+  assert.match(mysql, /CREATE USER IF NOT EXISTS 'order_api'@'%' IDENTIFIED BY '\$\(sql_string "\$DB_PASSWORD_ORDER_API"\)';\nGRANT ALL PRIVILEGES ON \\`order_api\\`\.\* TO 'order_api'@'%';/);
+  assert.match(mysql, /GRANT ALL PRIVILEGES ON \\`billing\\`\.\* TO 'billing'@'%';/);
+  assert.doesNotMatch(mysql, /TO 'app'@/, 'the shared user gets no grant on the service databases');
+  assert.equal(file(r, 'db/mongo/init.js'), "// One database and one user per service, each with its own password (from the environment). Runs once, when the data volume is first created.\ndb.getSiblingDB('order_api').createUser({ user: 'order_api', pwd: process.env.MONGO_PASSWORD_ORDER_API, roles: [{ role: 'readWrite', db: 'order_api' }] });\n");
+  assert.match(file(r, '.env.example'), /^DB_PASSWORD_ORDER_API=change-me\nDB_PASSWORD_BILLING=change-me\nMONGO_PASSWORD_ORDER_API=change-me$/m);
 });
 
 test('database per service: one service ignores it; redis has sixteen databases', () => {
   const single = generate({ services: [svc('backend', 'django')] }, { dbPerService: true, db: ['postgres'] });
   assert.ok(single.notes.some((n) => n.includes('A database per service was ignored')));
-  assert.equal(file(single, 'db/postgres/init.sql'), undefined);
+  assert.equal(file(single, 'db/postgres/init.sh'), undefined);
   const many = { services: Array.from({ length: 17 }, (_, i) => svc(`s${i}`, 'django')) };
   assert.throws(() => generate(many, { dbPerService: true, db: ['redis'] }), /redis has 16 databases/);
   assert.doesNotThrow(() => generate(many, { db: ['redis'] }));

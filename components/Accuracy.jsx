@@ -24,8 +24,8 @@ export default function Accuracy() {
           </li>
           <li>
             <strong>Before you rely on it:</strong> read the notes below (they list everything that was guessed or left out), build the image once, and run
-            the pipeline on a branch. You can edit any block here first (<em>Edit blocks</em>) and your edits are kept when you change the options, or edit
-            the files after downloading.
+            the pipeline on a branch. You can edit any block here first (<em>Edit blocks</em>): your edits are kept when you change the options and, with
+            the options, in this browser until you press <em>Start over</em>. Or edit the files after downloading.
           </li>
         </ul>
       </details>

@@ -1,5 +1,6 @@
-import { block, changedGuard, changedLines, cmd, defaultBranch, deployPlan, dockerRunDeploy, isMulti, jobId, mapLines, matchRegex, q, serviceEnv, serviceUrl, shellPlan } from './common.js';
+import { block, changedGuard, changedLines, cmd, defaultBranch, deployPlan, dockerRunDeploy, exportLine, isMulti, jobId, mapLines, matchRegex, q, serviceEnv, serviceUrl, shellPlan } from './common.js';
 import { DBS } from '../compose.js';
+import { VERSIONS } from '../tools.js';
 
 const REF = [
   'REF_SLUG=$(printf "%s" "${CIRCLE_BRANCH:-$CIRCLE_TAG}" | tr -c "A-Za-z0-9_.\\n-" "-")',
@@ -15,9 +16,9 @@ function render(p) {
   const multi = isMulti(p);
   const plans = p.apps.map((app) => ({ app, plan: shellPlan(p, app, vars, { alpine: false }) }));
   const registry = plans[0].plan.registry;
-  const machine = ['    machine:', '      image: ubuntu-2204:current'];
+  const machine = ['    machine:', `      image: ${VERSIONS.circleciMachine}`];
   const blocks = [block('version', 'Config version', 'version: 2.1', false)];
-  const exportEnv = p.pipelineEnv.map(([k, v]) => `export ${k}=${JSON.stringify(v)}`);
+  const exportEnv = p.pipelineEnv.map(exportLine);
   const jobs = ['jobs:'];
   const names = [];
   const add = (id, title, lines) => {
@@ -39,7 +40,7 @@ function render(p) {
       '        type: boolean',
       '        default: false',
       '    docker:',
-      '      - image: cimg/base:stable',
+      `      - image: ${VERSIONS.circleciBase}`,
       '    steps:',
       '      - checkout',
       run('Find the changed services', [
@@ -79,7 +80,7 @@ function render(p) {
     }
   }
   if (p.lintDockerfile) {
-    add('lint-dockerfile', 'lint-dockerfile', ['  lint-dockerfile:', '    docker:', '      - image: hadolint/hadolint:latest-debian', '    steps:', '      - checkout', plans.map(({ app, plan }) => run(`Hadolint${multi ? ` ${app.id}` : ''}`, plan.lintDockerfile))]);
+    add('lint-dockerfile', 'lint-dockerfile', ['  lint-dockerfile:', '    docker:', `      - image: ${VERSIONS.hadolint}`, '    steps:', '      - checkout', plans.map(({ app, plan }) => run(`Hadolint${multi ? ` ${app.id}` : ''}`, plan.lintDockerfile))]);
   }
   if (registry) {
     for (const { app, plan } of plans) {
@@ -153,6 +154,8 @@ export const circleci = {
   builtinRegistry: false,
   secretsLocation: 'CircleCI (Project settings > Environment variables, or a context)',
   features: ['schedule', 'services', 'tagFilters', 'branchIgnore'],
+  deploySecretsNote: ({ secrets }) =>
+    `Keep ${secrets} in a restricted context (Organization Settings > Contexts, limited to a security group), not in project environment variables, and add \`context: <name>\` to the deploy job in the workflow, so other jobs and forked pull requests never get them.`,
   notes: ({ triggers }) => [
     'CircleCI runs on every push to a branch, including pull-request branches; it has no separate pull-request trigger, so use branch filters to narrow it.',
     'CircleCI starts a workflow only for tags that a job explicitly allows: the tag filter above applies to every job.',

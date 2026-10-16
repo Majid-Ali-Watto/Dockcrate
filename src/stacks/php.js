@@ -1,8 +1,15 @@
 import { lines } from '../fsutil.js';
-import { DEFAULT_BUILD, apt, envLines, healthcheck } from '../container.js';
+import { DEFAULT_BUILD, DEV_ROOT, apt, envLines, healthcheck, runAsOf, userLine } from '../container.js';
+import { VERSIONS } from '../tools.js';
 
 const DEFAULT_VERSION = '8.4';
 const COMPOSER = 'command -v composer >/dev/null || (apt-get update -qq && apt-get install -y -qq git unzip && curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer)';
+
+// www-data in the Debian based PHP images.
+const WWW_DATA = 33;
+// The code belongs to root (www-data can read it, not rewrite it); only the folders Laravel writes to, when they exist, are handed over.
+const WRITABLE = ['storage', 'bootstrap/cache'];
+const handOver = `RUN for d in ${WRITABLE.join(' ')}; do if [ -d "$d" ]; then chown -R www-data:www-data "$d"; fi; done`;
 
 const testCommand = (i) => (i.pkg.scripts?.test ? 'composer test' : i.framework === 'laravel' ? 'php artisan test' : 'vendor/bin/phpunit');
 
@@ -38,9 +45,10 @@ export const php = {
     return {
       dockerfile: lines(
         '# syntax=docker/dockerfile:1',
+        DEV_ROOT,
         `FROM php:${i.version}-apache`,
         'COPY --from=composer:2 /usr/bin/composer /usr/bin/composer',
-        'COPY --from=ghcr.io/mlocati/php-extension-installer:latest /usr/bin/install-php-extensions /usr/local/bin/',
+        `COPY --from=${VERSIONS.phpExtensionInstaller} /usr/bin/install-php-extensions /usr/local/bin/`,
         `RUN install-php-extensions ${i.extensions.join(' ')}`,
         apt({ packages: ['git', 'unzip', ...c.packages] }),
         `RUN sed -ri -e 's!/var/www/html!${root}!g' /etc/apache2/sites-available/*.conf /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf \\`,
@@ -64,7 +72,7 @@ export const php = {
     const runtime = (source, { tools = false } = {}) => [
       `FROM php:${i.version}-apache AS runtime`,
       tools && 'COPY --from=composer:2 /usr/bin/composer /usr/bin/composer',
-      'COPY --from=ghcr.io/mlocati/php-extension-installer:latest /usr/bin/install-php-extensions /usr/local/bin/',
+      `COPY --from=${VERSIONS.phpExtensionInstaller} /usr/bin/install-php-extensions /usr/local/bin/`,
       `RUN install-php-extensions ${i.extensions.join(' ')}`,
       apt(tools ? { packages: ['git', 'unzip', ...c.packages] } : c),
       // Apache listens on an unprivileged port and runs as www-data, so the usual root-only paths are handed over.
@@ -76,14 +84,15 @@ export const php = {
       envLines(c),
       'WORKDIR /var/www/html',
       ...source,
-      'USER www-data',
+      handOver,
+      userLine(WWW_DATA),
       `EXPOSE ${port}`,
       healthcheck(c, port, 'curl'),
     ];
-    if (b.mode === 'production') return lines('# syntax=docker/dockerfile:1', runtime(['COPY --chown=www-data:www-data . ./']));
+    if (b.mode === 'production') return lines('# syntax=docker/dockerfile:1', runtime(['COPY . ./']));
     if (b.mode === 'mixed') {
       // One image: composer installs everything (development packages too) inside the Apache image.
-      return lines('# syntax=docker/dockerfile:1', runtime(['COPY --chown=www-data:www-data . ./', 'RUN composer install --no-interaction --prefer-dist'], { tools: true }));
+      return lines('# syntax=docker/dockerfile:1', runtime(['COPY . ./', 'RUN composer install --no-interaction --prefer-dist'], { tools: true }));
     }
     return lines(
       '# syntax=docker/dockerfile:1',
@@ -95,13 +104,15 @@ export const php = {
       'COPY . .',
       'RUN composer dump-autoload --optimize --no-dev',
       '',
-      runtime(['COPY --from=vendor --chown=www-data:www-data /app ./']),
+      runtime(['COPY --from=vendor /app ./']),
     );
   },
   variants: ['slim'],
   defaultVariant: 'slim',
   variantNote: 'the image runs Apache, which the Alpine PHP images do not include',
   healthKind: () => 'curl',
+  // Laravel writes to storage/ and bootstrap/cache, which hold folders of the app itself: an emptyDir over them would hide those.
+  runAs: () => runAsOf(WWW_DATA, { readOnlyRoot: false, why: 'PHP apps (Laravel) write to storage/ and bootstrap/cache inside the app folder' }),
   buildNotes: (i, b) => [
     b.mode === 'production' && 'Production only: the image copies your project including its vendor/ folder, so run `composer install --no-dev --optimize-autoloader` first (the generated pipeline builds the image from the repository as it is).',
     b.mode === 'mixed' && 'Build and production in one image: composer, git and your development packages stay in the image next to the app.',

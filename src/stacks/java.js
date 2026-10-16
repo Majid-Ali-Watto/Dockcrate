@@ -1,5 +1,5 @@
 import { lines } from '../fsutil.js';
-import { DEFAULT_BUILD, apt, envLines, healthcheck, pkgs } from '../container.js';
+import { DEFAULT_BUILD, DEV_ROOT, apt, envLines, healthcheck, pkgs, runAsOf, systemUser, userLine } from '../container.js';
 
 const SKIPPED_JARS = ["'*-plain.jar'", "'*-sources.jar'", "'*-javadoc.jar'"].map((p) => `! -name ${p}`).join(' ');
 
@@ -25,6 +25,7 @@ export const java = {
     return {
       dockerfile: lines(
         '# syntax=docker/dockerfile:1',
+        DEV_ROOT,
         maven ? `FROM maven:3-eclipse-temurin-${i.version}` : `FROM eclipse-temurin:${i.version}-jdk`,
         'WORKDIR /app',
         apt(c),
@@ -47,7 +48,7 @@ export const java = {
     const suffix = alpine ? '-alpine' : '';
     const jdk = maven ? `maven:3-eclipse-temurin-${i.version}${suffix}` : `eclipse-temurin:${i.version}-jdk${suffix}`;
     const jre = `eclipse-temurin:${i.version}-jre${suffix}`;
-    const user = alpine ? 'RUN addgroup -S app && adduser -S -G app app' : 'RUN groupadd --system app && useradd --system --gid app app';
+    const user = systemUser(v);
     const probe = alpine ? 'wget' : 'tcp';
     const build = [
       `RUN --mount=type=cache,target=${maven ? '/root/.m2' : '/root/.gradle'} \\`,
@@ -63,8 +64,8 @@ export const java = {
         pkgs(c, v),
         user,
         `COPY ${outDir}/*.jar /tmp/jars/`,
-        `RUN find /tmp/jars -maxdepth 1 -name '*.jar' ${SKIPPED_JARS} -exec mv {} app.jar \\; && chown app:app app.jar && rm -rf /tmp/jars`,
-        'USER app',
+        `RUN find /tmp/jars -maxdepth 1 -name '*.jar' ${SKIPPED_JARS} -exec mv {} app.jar \\; && rm -rf /tmp/jars`,
+        userLine(),
         `ENV SERVER_PORT=${port}`,
         envLines(c),
         `EXPOSE ${port}`,
@@ -83,7 +84,7 @@ export const java = {
         ...build,
         `    ${pick('/app/app.jar')}`,
         user,
-        'USER app',
+        userLine(),
         `ENV SERVER_PORT=${port}`,
         envLines(c),
         `EXPOSE ${port}`,
@@ -103,8 +104,8 @@ export const java = {
       'WORKDIR /app',
       pkgs(c, v),
       user,
-      'COPY --from=build --chown=app:app /app.jar app.jar',
-      'USER app',
+      'COPY --from=build /app.jar app.jar',
+      userLine(),
       `ENV SERVER_PORT=${port}`,
       envLines(c),
       `EXPOSE ${port}`,
@@ -115,6 +116,8 @@ export const java = {
   variants: ['alpine', 'slim'],
   defaultVariant: 'slim',
   healthKind: (b) => (b.variant === 'alpine' ? 'wget' : 'tcp'),
+  // Spring Boot (Tomcat) keeps its work files under /tmp.
+  runAs: () => runAsOf(10001),
   buildNotes: (i, b) => [
     b.variant === 'alpine' && 'Alpine Temurin images exist for some Java versions only (8, 11, 17, 21 and a few newer ones): if the image cannot be pulled, choose slim or another version.',
     b.mode === 'production' && `Production only: the image copies the jar from ${i.tool === 'maven' ? 'target/' : 'build/libs/'}, so build it first (${i.tool === 'maven' ? 'mvn package' : './gradlew bootJar'}); the generated pipeline builds the image from the repository as it is.`,

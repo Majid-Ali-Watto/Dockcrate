@@ -17,7 +17,7 @@ export const PINS = {
   'docker/metadata-action@v5': 'c299e40c65443455700f0fdfc63efafe5b349051',
   'docker/setup-buildx-action@v3': '8d2750c68a42422c14e847fe6c8ac0403b4cbd6f',
   'docker/setup-qemu-action@v3': 'c7c53464625b32c7a7e944ae62b3e17d2b600130',
-  'dtolnay/rust-toolchain@stable': '686976e191b89faba57d3206551f0f330d8cb249',
+  'dtolnay/rust-toolchain@stable': 'b725eda525362e7cf34af9a7243cac1e3f01a7ec',
   'github/codeql-action/analyze@v3': 'ce5e7eeac396d720fe2d802714996c8ce561e311',
   'github/codeql-action/init@v3': 'ce5e7eeac396d720fe2d802714996c8ce561e311',
   'google-github-actions/auth@v2': 'c200f3691d83b41bf9bbd8638997a462592937ed',
@@ -26,7 +26,7 @@ export const PINS = {
   'ruby/setup-ruby@v1': '651ff0d62c5c79bed6d53ec518387aae20e72c1a',
   'shivammathur/setup-php@v2': 'eb7c497e18156a6bbabfef1d3a82760b9eda3962',
   'sigstore/cosign-installer@v3': '398d4b0eeef1380460a10c8013a76f728fb906ac',
-  'superfly/flyctl-actions/setup-flyctl@master': 'ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1',
+  'superfly/flyctl-actions/setup-flyctl@1.5': 'fc53c09e1bc3be6f54706524e3b82c4f462f77be',
 };
 
 /** `owner/repo@v4` -> `owner/repo@<sha> # v4`; an action without a pin is returned unchanged. */

@@ -16,7 +16,7 @@ export default async function Landing({ slug }) {
         <nav className="crumbs" aria-label="Breadcrumb">
           <a href="/">Home</a>
           <span aria-hidden="true">/</span>
-          <span>{page.nav}</span>
+          <span aria-current="page">{page.nav}</span>
         </nav>
         <h1>{page.h1}</h1>
         <p className="section-lead">{page.lead}</p>

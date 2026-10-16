@@ -30,8 +30,8 @@ test('the image flavor changes the base image of every stack that has both', () 
   assert.deepEqual(first('java', 'slim'), ['maven:3-eclipse-temurin-21 AS build', 'eclipse-temurin:21-jre AS runtime']);
   assert.deepEqual(first('dotnet', 'alpine'), ['mcr.microsoft.com/dotnet/sdk:9.0-alpine AS build', 'mcr.microsoft.com/dotnet/aspnet:9.0-alpine AS runtime']);
   assert.deepEqual(first('ruby', 'alpine'), ['ruby:3.4-alpine AS build', 'ruby:3.4-alpine AS runtime']);
-  assert.deepEqual(first('react', 'slim'), ['node:24-slim AS build', 'nginxinc/nginx-unprivileged:bookworm']);
-  assert.deepEqual(first('vue', 'alpine'), ['node:24-alpine AS build', 'nginxinc/nginx-unprivileged:alpine']);
+  assert.deepEqual(first('react', 'slim'), ['node:24-slim AS build', 'nginxinc/nginx-unprivileged:1.30-trixie']);
+  assert.deepEqual(first('vue', 'alpine'), ['node:24-alpine AS build', 'nginxinc/nginx-unprivileged:1.30-alpine']);
   // the same Gradle project gets a JDK image instead of the Maven one
   assert.deepEqual(first('java', 'alpine', { tool: 'gradle' }), ['eclipse-temurin:21-jdk-alpine AS build', 'eclipse-temurin:21-jre-alpine AS runtime']);
 });
@@ -52,7 +52,7 @@ test('OS packages, users and the healthcheck follow the flavor', () => {
   assert.match(nodeSlim, /apt-get install -y --no-install-recommends curl/);
   assert.match(nodeSlim, /HEALTHCHECK .*"node","-e","fetch\('http:\/\/127\.0\.0\.1:3000\/health'\)/, 'slim node has no wget: the probe is node itself');
   assert.match(dockerfile({ stack: 'django', imageVariant: 'alpine', packages: ['libpq'] }), /RUN addgroup -S -g 10001 app && adduser -S -u 10001 -G app app/);
-  assert.match(dockerfile({ stack: 'django', imageVariant: 'slim' }), /RUN useradd --system --uid 10001 app/);
+  assert.match(dockerfile({ stack: 'django', imageVariant: 'slim' }), /RUN groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app app/);
   assert.match(dockerfile({ stack: 'java', imageVariant: 'alpine', healthcheck: '/h' }), /HEALTHCHECK .* wget/);
   assert.match(dockerfile({ stack: 'java', imageVariant: 'slim', healthcheck: '/h' }), /HEALTHCHECK .*bash/);
   // the "no curl or wget" note follows the image that is actually built
@@ -64,7 +64,7 @@ test('OS packages, users and the healthcheck follow the flavor', () => {
 test('python: the multi-stage build installs into a virtualenv that the runtime copies', () => {
   const pip = dockerfile({ stack: 'django' });
   assert.match(pip, /FROM python:3\.13-slim AS build[\s\S]*build-essential[\s\S]*RUN python -m venv \/opt\/venv[\s\S]*RUN pip install --no-cache-dir -r requirements\.txt/);
-  assert.match(pip, /FROM python:3\.13-slim AS runtime\nENV .* VIRTUAL_ENV=\/opt\/venv PATH="\/opt\/venv\/bin:\$PATH"[\s\S]*COPY --from=build \/opt\/venv \/opt\/venv\nCOPY --chown=app:app \. \./);
+  assert.match(pip, /FROM python:3\.13-slim AS runtime\nENV .* VIRTUAL_ENV=\/opt\/venv PATH="\/opt\/venv\/bin:\$PATH"[\s\S]*COPY --from=build \/opt\/venv \/opt\/venv\nCOPY \. \.\nUSER 10001:10001/);
   assert.doesNotMatch(pip.split('AS runtime')[1], /build-essential|pip install/, 'no compilers and no pip run in the final image');
   const uv = dockerfile({ stack: 'fastapi', tool: 'uv' });
   assert.match(uv, /UV_PROJECT_ENVIRONMENT=\/opt\/venv/);
@@ -98,13 +98,13 @@ test('production only: the runtime image copies what you built, and says so', ()
   assert.match(dockerfile({ stack: 'dotnet', ...single }), /FROM mcr\.microsoft\.com\/dotnet\/aspnet:9\.0\n[\s\S]*COPY publish\/ \./);
   assert.match(note('dotnet'), /dotnet publish -c Release -o publish/);
   const spa = dockerfile({ stack: 'react', ...single });
-  assert.match(spa, /^FROM nginxinc\/nginx-unprivileged:alpine\nCOPY nginx\.conf[\s\S]*COPY dist\/ \/usr\/share\/nginx\/html\//m);
+  assert.match(spa, /^FROM nginxinc\/nginx-unprivileged:1\.30-alpine\nCOPY nginx\.conf[\s\S]*COPY dist\/ \/usr\/share\/nginx\/html\/\nUSER 101:101/m);
   assert.match(note('react'), /run `npm run build` before `docker build`/);
   assert.ok(file(fresh({ stack: 'react', ...single }), 'nginx.conf'));
   const node = dockerfile({ stack: 'node', ...single });
-  assert.match(node, /RUN npm ci --omit=dev\nCOPY --chown=node:node \. \.\nUSER node/);
+  assert.match(node, /RUN npm ci --omit=dev\nCOPY \. \.\n# Next\.js[^\n]*\nRUN mkdir -p \.next\/cache && chown -R 1000:1000 \.next\nUSER 1000:1000/);
   assert.doesNotMatch(node, /npm run build/);
-  assert.match(dockerfile({ stack: 'php', ...single }), /FROM php:8\.4-apache AS runtime[\s\S]*COPY --chown=www-data:www-data \. \.\/\nUSER www-data/);
+  assert.match(dockerfile({ stack: 'php', ...single }), /FROM php:8\.4-apache AS runtime[\s\S]*COPY \. \.\/\nRUN for d in storage bootstrap\/cache; [^\n]*\nUSER 33:33/);
   assert.match(note('php'), /composer install --no-dev/);
   // an interpreted stack needs no prebuilt output; its note is about the missing compilers
   assert.match(note('django'), /without compilers/);
@@ -137,10 +137,10 @@ test('build and production mixed: one image with the toolchain, built from the s
   assert.match(java, /FROM maven:3-eclipse-temurin-21\nWORKDIR \/app\nCOPY \. \.\nRUN --mount=type=cache,target=\/root\/\.m2 \\\n {4}mvn -B -DskipTests package && \\\n {4}find target[\s\S]*-exec cp \{\} \/app\/app\.jar/);
   assert.match(dockerfile({ stack: 'dotnet', ...mixed }), /FROM mcr\.microsoft\.com\/dotnet\/sdk:9\.0\n[\s\S]*dotnet publish[\s\S]*WORKDIR \/app\/publish[\s\S]*ENTRYPOINT \["dotnet", "App\.dll"\]/);
   const node = dockerfile({ stack: 'node', ...mixed });
-  assert.match(node, /RUN npm ci\nCOPY --chown=node:node \. \.[\s\S]*ENV NODE_ENV=production/);
+  assert.match(node, /RUN npm ci\nCOPY \. \.\n# Next\.js[^\n]*\nRUN npm run build && mkdir -p \.next\/cache && chown -R 1000:1000 \.next\nENV NODE_ENV=production/);
   assert.doesNotMatch(node, /--omit=dev/, 'devDependencies stay in a mixed image');
   const spa = dockerfile({ stack: 'vue', ...mixed });
-  assert.match(spa, /RUN npm run build\nRUN npm install --global serve@14\nUSER node[\s\S]*CMD \["serve","-s","dist","-l","8080"\]/);
+  assert.match(spa, /RUN npm run build\nRUN npm install --global serve@14\nUSER 1000:1000[\s\S]*CMD \["serve","-s","dist","-l","8080"\]/);
   assert.equal(file(fresh({ stack: 'vue', ...mixed }), 'nginx.conf'), undefined, 'no nginx, no nginx.conf');
   assert.match(dockerfile({ stack: 'django', ...mixed }), /build-essential[\s\S]*RUN uv sync|build-essential[\s\S]*RUN pip install/);
   const mixedUv = dockerfile({ stack: 'django', tool: 'uv', ...mixed });
@@ -185,4 +185,42 @@ test('the API takes the flavor and the stage options, and lists what each stack 
   const data = handleGenerate({ mode: 'new', stack: 'go', imageVariant: 'slim', multistage: false, stageMode: 'mixed', ci: 'none' });
   assert.deepEqual(froms(data.files.find((f) => f.path === 'Dockerfile').content), ['golang:1.25-bookworm']);
   assert.throws(() => handleGenerate({ mode: 'new', stack: 'go', imageVariant: 'x', ci: 'none' }), /invalid image variant/);
+});
+
+test('every stack, flavor and mode runs as a numeric non-root user that cannot rewrite its own code', async () => {
+  const { STACKS } = await import('../src/stacks/index.js');
+  const modes = [['multi', {}], ['production', { multistage: false }], ['mixed', { multistage: false, stageMode: 'mixed' }]];
+  for (const stack of STACKS) {
+    for (const imageVariant of stack.variants) {
+      for (const [mode, opts] of modes) {
+        const what = `${stack.id} ${imageVariant} ${mode}`;
+        const df = dockerfile({ stack: stack.id, imageVariant, ...opts });
+        const users = df.split('\n').filter((l) => l.startsWith('USER '));
+        const last = users.at(-1);
+        const runAs = stack.runAs({}, { variant: imageVariant, mode });
+        assert.ok(runAs.uid > 0, what);
+        // .NET records its own numeric user through $APP_UID (1654); nginx and node images have theirs.
+        if (stack.id === 'dotnet') assert.equal(last, 'USER $APP_UID', what);
+        else assert.equal(last, `USER ${runAs.uid}:${runAs.gid}`, what);
+        assert.ok(runAs.writable.includes('/tmp'), what);
+        // Code is copied as root's: only Next.js' .next folder is handed to the node user.
+        for (const line of df.split('\n').filter((l) => /--chown/.test(l))) assert.match(line, /\/next \.\/\.next$/, `${what}: ${line}`);
+        assert.doesNotMatch(df, /chown -R \S+ \.(\s|$)|chown -R \S+ \/app(\s|$)/, what);
+      }
+    }
+  }
+  assert.equal(STACKS.find((s) => s.id === 'php').runAs().readOnlyRoot, false);
+  assert.deepEqual(STACKS.find((s) => s.id === 'ruby').runAs().writable, ['/tmp', '/app/tmp', '/app/log', '/app/storage']);
+  assert.equal(STACKS.find((s) => s.id === 'react').runAs({}, { mode: 'mixed' }).uid, 1000);
+  assert.equal(STACKS.find((s) => s.id === 'react').runAs({}, { mode: 'multi' }).uid, 101);
+});
+
+test('the development Dockerfile says why it runs as root', () => {
+  for (const stack of stackIds()) {
+    const r = fresh({ stack, envs: ['dev'] });
+    const dev = file(r, 'Dockerfile.dev');
+    if (!dev) continue;
+    assert.match(dev, /^# syntax=docker\/dockerfile:1\n# Development only: runs as root[^\n]*Never deploy it/, stack);
+    assert.doesNotMatch(dev, /^USER /m, stack);
+  }
 });

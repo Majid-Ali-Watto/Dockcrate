@@ -2,6 +2,7 @@
 // a Makefile and an .editorconfig. All of them belong to the "repo" file group and are opt-in (`opts.extras`).
 import { lines } from './fsutil.js';
 import { isDevEnv, overrideName } from './compose.js';
+import { VERSIONS } from './tools.js';
 
 export const EXTRAS = ['dependabot', 'devcontainer', 'makefile', 'editorconfig'];
 
@@ -28,24 +29,18 @@ function dependabot(units) {
   );
 }
 
+const DIND_COMMENT =
+  '// docker-in-docker runs this container privileged (root on the host for anything in it). Delete the "features" entry if you do not need Docker inside the dev container.';
+
 const renovate = () =>
   JSON.stringify({ $schema: 'https://docs.renovatebot.com/renovate-schema.json', extends: ['config:recommended'] }, null, 2) + '\n';
 
 function devcontainer(stack, info, { appName, port }) {
   const image = stack.devcontainer?.(info);
   if (!image) return null;
-  return (
-    JSON.stringify(
-      {
-        name: appName,
-        image,
-        features: { 'ghcr.io/devcontainers/features/docker-in-docker:2': {} },
-        forwardPorts: [port],
-      },
-      null,
-      2,
-    ) + '\n'
-  );
+  const json = JSON.stringify({ name: appName, image, features: { 'ghcr.io/devcontainers/features/docker-in-docker:2': {} }, forwardPorts: [port] }, null, 2);
+  // devcontainer.json is JSONC, so the warning sits next to the line it is about.
+  return json.replace('  "features"', `  ${DIND_COMMENT}\n  "features"`) + '\n';
 }
 
 const makefile = ({ appName, units, composeFile, envs }) => {
@@ -73,10 +68,10 @@ const makefile = ({ appName, units, composeFile, envs }) => {
     `\tdocker compose -f ${composeFile} logs -f`,
     '',
     'lint-docker:',
-    units.map((u) => `\tdocker run --rm -i hadolint/hadolint < ${u.prefix}Dockerfile`),
+    units.map((u) => `\tdocker run --rm -i ${VERSIONS.hadolintPlain} < ${u.prefix}Dockerfile`),
     '',
     'scan: build',
-    units.map((u) => `\tdocker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.69.3 image --severity HIGH,CRITICAL ${image(u)}`),
+    units.map((u) => `\tdocker run --rm -v /var/run/docker.sock:/var/run/docker.sock ${VERSIONS.trivy} image --severity HIGH,CRITICAL ${image(u)}`),
   );
 };
 
@@ -117,7 +112,10 @@ export function extraFiles(selected, { units, provider, appName, composeFile, en
     if (name === 'devcontainer') {
       const [only] = units;
       const content = units.length === 1 ? devcontainer(only.stack, only.info, { appName, port: only.port }) : null;
-      if (content) files.push({ path: '.devcontainer/devcontainer.json', content });
+      if (content) {
+        files.push({ path: '.devcontainer/devcontainer.json', content });
+        notes.push('The dev container includes docker-in-docker, which runs it privileged; delete its "features" entry if you do not need Docker inside it.');
+      }
       else if (units.length > 1) notes.push('A dev container targets one stack, so none was generated for several services; use the dev environment of the compose file instead.');
       else notes.push(`No dev container image is known for ${only.stack.id}; the dev container file was skipped.`);
     }

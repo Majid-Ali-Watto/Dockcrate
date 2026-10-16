@@ -1,5 +1,5 @@
 import { lines } from '../fsutil.js';
-import { DEFAULT_BUILD, apt, envLines, healthcheck, pkgs } from '../container.js';
+import { DEFAULT_BUILD, DEV_ROOT, apt, envLines, healthcheck, pkgs, runAsOf } from '../container.js';
 
 export const dotnet = {
   id: 'dotnet',
@@ -23,6 +23,7 @@ export const dotnet = {
   dev: (i, port, c) => ({
     dockerfile: lines(
       '# syntax=docker/dockerfile:1',
+      DEV_ROOT,
       `FROM mcr.microsoft.com/dotnet/sdk:${i.version}`,
       'WORKDIR /src',
       `ENV ASPNETCORE_HTTP_PORTS=${port} DOTNET_USE_POLLING_FILE_WATCHER=true`,
@@ -44,6 +45,7 @@ export const dotnet = {
     const probe = v === 'alpine' ? 'wget' : 'tcp';
     const publish = (to) => [`RUN --mount=type=cache,target=/root/.nuget/packages \\`, `    dotnet publish "${i.csproj}" -c Release -o ${to} -p:UseAppHost=false`];
     const run = [`ENV ASPNETCORE_HTTP_PORTS=${port}`, envLines(c), pkgs(c, v)];
+    // $APP_UID is the images' numeric non-root user (1654), so the image records a number Kubernetes can check.
     const tail = ['USER $APP_UID', `EXPOSE ${port}`, healthcheck(c, port, probe), `ENTRYPOINT ["dotnet", "${i.name}.dll"]`];
     if (b.mode === 'production') {
       return lines('# syntax=docker/dockerfile:1', `FROM ${aspnet}`, 'WORKDIR /app', run, 'COPY publish/ .', tail);
@@ -69,6 +71,7 @@ export const dotnet = {
   variants: ['alpine', 'slim'],
   defaultVariant: 'slim',
   healthKind: (b) => (b.variant === 'alpine' ? 'wget' : 'tcp'),
+  runAs: () => runAsOf(1654),
   buildNotes: (i, b) => [
     b.mode === 'production' && 'Production only: the image copies a publish/ folder, so run `dotnet publish -c Release -o publish` first (the generated pipeline builds the image from the repository as it is).',
     b.mode === 'mixed' && 'Build and production in one image: it keeps the .NET SDK and the sources next to the published app, so it is much bigger than a multi-stage image.',

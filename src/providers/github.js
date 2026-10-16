@@ -5,6 +5,8 @@ import { REGISTRIES } from '../deploy.js';
 import { pinAction } from './pins.js';
 
 const NOT_PR = "github.event_name != 'pull_request'";
+/** No job keeps the token in .git/config after checkout: nothing later in a job needs git credentials. */
+const CHECKOUT = { key: 'checkout', uses: 'actions/checkout@v4', with: { 'persist-credentials': false } };
 
 const runLines = (run) => {
   const text = Array.isArray(run) ? run.join('\n') : run;
@@ -139,9 +141,12 @@ function render(p) {
   const runner = p.runner || 'ubuntu-latest';
   const timeout = p.timeout ? `    timeout-minutes: ${p.timeout}` : null;
 
-  // Workflow-wide permissions; id-token and packages are granted per job where they are needed.
-  const base = { contents: 'read', ...tokenPermissions(p.permissions) };
-  const jobPermissions = (extra = {}) => ({ ...base, ...extra });
+  // The workflow default is read-only. The extra permissions asked for go only to the jobs that publish or deploy (image,
+  // deploy), never to the ones that run the pushed or pull-request code (changes, test, lint); id-token and packages are
+  // granted per job where they are needed.
+  const base = { contents: 'read' };
+  const extra = tokenPermissions(p.permissions);
+  const jobPermissions = (more = {}) => ({ ...base, ...extra, ...more });
 
   const blocks = [];
   blocks.push(block('name', 'Workflow name', `name: ${scalar(p.workflowName)}`, false));
@@ -208,7 +213,7 @@ function render(p) {
     blocks.push(
       block('changes.header', 'changes: job settings', ['  changes:', `    runs-on: ${runner}`, timeout, '    outputs:', ['any', 'changed', ...lists.map((l) => l.key)].map((k) => `      ${k}: ${x(`steps.diff.outputs.${k}`)}`), '    steps:'], false),
       ...stepBlocks('changes', [
-        { key: 'checkout', uses: 'actions/checkout@v4', with: { 'fetch-depth': 0 } },
+        { ...CHECKOUT, with: { 'fetch-depth': 0, ...CHECKOUT.with } },
         { key: 'diff', id: 'diff', title: 'Find the changed services', run, env: { EVENT_NAME: x('github.event_name'), BEFORE: x('github.event.before'), BASE_REF: x('github.base_ref') } },
       ]),
     );
@@ -243,7 +248,7 @@ function render(p) {
         ],
         false,
       ),
-      ...stepBlocks(group.id, [{ key: 'checkout', uses: 'actions/checkout@v4' }, ...steps]),
+      ...stepBlocks(group.id, [CHECKOUT, ...steps]),
     );
   }
 
@@ -260,7 +265,7 @@ function render(p) {
         '    steps:',
       ]),
       ...stepBlocks('lint-dockerfile', [
-        { key: 'checkout', uses: 'actions/checkout@v4' },
+        CHECKOUT,
         { key: 'hadolint', uses: 'hadolint/hadolint-action@v3.1.0', with: { dockerfile: multi ? x('matrix.dockerfile') : inApp(p.apps[0], 'Dockerfile'), 'failure-threshold': 'error' } },
       ]),
     );
@@ -274,6 +279,11 @@ function render(p) {
   const matrixApp = { id: x('matrix.service') };
   const imageName = (template) => imageRepo(template, p, multi ? matrixApp : p.apps[0]);
   if (registry) {
+    // What both builds of the image share: the folder and the build args.
+    const build = {
+      context: multi ? x('matrix.dir') : p.apps[0].dir,
+      ...(withArgs && { 'build-args': multi ? x('steps.args.outputs.value') : p.apps[0].buildArgs.map((n) => `${n}=${x(`vars.${n}`)}`).join('\n') }),
+    };
     const tags = [...p.imageTags.filter((k) => k !== 'latest').flatMap((k) => IMAGE_TAGS[k]), 'type=sha,format=long', ...(p.imageTags.includes('latest') ? IMAGE_TAGS.latest : [])];
     blocks.push(
       block('image.header', 'image: job settings', [
@@ -295,7 +305,7 @@ function render(p) {
         '    steps:',
       ]),
       ...stepBlocks('image', [
-        { key: 'checkout', uses: 'actions/checkout@v4' },
+        CHECKOUT,
         multiArch && { key: 'qemu', uses: 'docker/setup-qemu-action@v3' },
         { key: 'buildx', uses: 'docker/setup-buildx-action@v3' },
         ...imageAuth.map((s) => ({ key: 'cloud-login', ...s, if: NOT_PR })),
@@ -325,16 +335,37 @@ function render(p) {
           uses: 'docker/metadata-action@v5',
           with: { images: x('steps.ref.outputs.name'), tags: tags.join('\n') },
         },
+        // With a scan, the image is built for one platform and loaded into the runner's Docker first, scanned, and only pushed
+        // (every platform, from the layer cache) and signed when the scan passed. Pull requests are built and scanned, never pushed.
+        p.scan && {
+          key: 'build-scan',
+          title: 'Build the image to scan',
+          uses: 'docker/build-push-action@v6',
+          with: {
+            ...build,
+            ...(p.platforms.length && { platforms: p.platforms[0] }),
+            load: 'true',
+            push: 'false',
+            provenance: 'false',
+            tags: x('steps.ref.outputs.image'),
+            ...(p.layerCache && { 'cache-from': 'type=gha', 'cache-to': 'type=gha,mode=max' }),
+          },
+        },
+        p.scan && {
+          key: 'trivy',
+          uses: 'aquasecurity/trivy-action@0.35.0',
+          with: { 'image-ref': x('steps.ref.outputs.image'), severity: p.scanSeverity.join(','), 'ignore-unfixed': 'true', 'exit-code': '1' },
+        },
         {
           key: 'build-push',
           id: 'build',
+          ...(p.scan && { title: 'Build and push the image', if: NOT_PR }),
           uses: 'docker/build-push-action@v6',
           with: {
-            context: multi ? x('matrix.dir') : p.apps[0].dir,
+            ...build,
             ...(p.sbom && { sbom: 'true', provenance: 'mode=max' }),
             ...(p.platforms.length && { platforms: p.platforms.join(',') }),
-            ...(withArgs && { 'build-args': multi ? x('steps.args.outputs.value') : p.apps[0].buildArgs.map((n) => `${n}=${x(`vars.${n}`)}`).join('\n') }),
-            push: x(NOT_PR),
+            push: p.scan ? 'true' : x(NOT_PR),
             tags: x('steps.meta.outputs.tags'),
             labels: x('steps.meta.outputs.labels'),
             ...(p.layerCache && { 'cache-from': 'type=gha', 'cache-to': 'type=gha,mode=max' }),
@@ -347,12 +378,6 @@ function render(p) {
           if: NOT_PR,
           run: 'cosign sign --yes "$IMAGE@$DIGEST"',
           env: { IMAGE: x('steps.ref.outputs.name'), DIGEST: x('steps.build.outputs.digest') },
-        },
-        p.scan && {
-          key: 'trivy',
-          if: NOT_PR,
-          uses: 'aquasecurity/trivy-action@0.35.0',
-          with: { 'image-ref': x('steps.ref.outputs.image'), severity: p.scanSeverity.join(','), 'ignore-unfixed': 'true', 'exit-code': '1' },
         },
       ]),
     );
@@ -395,11 +420,11 @@ function render(p) {
           '    concurrency:',
           `      group: deploy-${d.name}`,
           '      cancel-in-progress: false',
-          permissionLines(jobPermissions({ ...(target.usesRegistryEnv && !base.packages && { packages: 'read' }), ...(p.oidc && { 'id-token': 'write' }) }), '    '),
+          permissionLines(jobPermissions({ ...(target.usesRegistryEnv && !extra.packages && { packages: 'read' }), ...(p.oidc && { 'id-token': 'write' }) }), '    '),
           '    steps:',
         ]),
         ...stepBlocks(d.id, [
-          { key: 'checkout', uses: 'actions/checkout@v4' },
+          CHECKOUT,
           ...auth.map((s) => ({ key: 'cloud-login', ...s })),
           ...(target.github?.prepare ?? []).map((s) => ({ key: 'prepare', ...s })),
           imageRefs,
@@ -444,7 +469,7 @@ function codeqlFiles(p, stacks) {
           '    steps:',
         ], false),
         ...stepBlocks('analyze', [
-          { key: 'checkout', uses: 'actions/checkout@v4' },
+          CHECKOUT,
           { key: 'init', uses: 'github/codeql-action/init@v3', with: { languages: language, 'build-mode': several ? x("matrix['build-mode']") : buildMode(languages[0]) } },
           { key: 'analyze', uses: 'github/codeql-action/analyze@v3', with: { category: `/language:${language}` } },
         ]),
@@ -461,6 +486,8 @@ export const github = {
   builtinRegistry: true,
   secretsLocation: 'GitHub (Settings > Secrets and variables > Actions)',
   variablesName: 'GitHub repository variables',
+  deploySecretsNote: ({ secrets, environments }) =>
+    `Keep ${secrets} as environment secrets of ${environments} (Settings > Environments), not repository secrets, and protect each environment (required reviewers, deployment branches and tags limited to the ones that deploy): only the deploy job, which names the environment, can read them then. The image job has no environment, so the registry login stays in repository secrets.`,
   features: [...COMMON, 'release', 'sbom', 'sign', 'codeScan', 'pinActions'],
   render,
   extraFiles: codeqlFiles,
@@ -472,7 +499,9 @@ export const gitea = {
   path: '.gitea/workflows/ci.yml',
   builtinRegistry: false,
   secretsLocation: 'Gitea (Settings > Actions > Secrets and Variables)',
-  features: ['prBranches', 'manual', 'schedule', 'paths', 'os', 'services', 'runner', 'timeout', 'tagFilters', 'branchIgnore', 'depCache', 'layerCache', 'platforms'],
-  notes: () => ['Gitea Actions needs a registered act runner; actions are pulled from github.com by default.'],
+  features: ['prBranches', 'manual', 'schedule', 'paths', 'os', 'services', 'runner', 'timeout', 'tagFilters', 'branchIgnore', 'depCache', 'layerCache', 'platforms', 'pinActions'],
+  notes: () => ['Gitea Actions needs a registered act runner; actions are pulled from github.com by default and pinned to full commit SHAs.'],
+  deploySecretsNote: ({ secrets }) =>
+    `Gitea has no protected environments: every workflow of the repository can read ${secrets}, so limit who can push workflows (branch protection, write access) and give these credentials the least access that deploys (a deploy-only SSH user, a namespaced Kubernetes ServiceAccount, a deploy token).`,
   render,
 };

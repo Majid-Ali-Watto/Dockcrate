@@ -1,5 +1,5 @@
 import { REGISTRIES, TARGETS, deployApps } from './deploy.js';
-import { DBS } from './compose.js';
+import { CI_PASSWORD, DBS } from './compose.js';
 import { github, gitea } from './providers/github.js';
 import { gitlab } from './providers/gitlab.js';
 import { jenkins } from './providers/jenkins.js';
@@ -21,9 +21,11 @@ export const CONCURRENCY = ['prs', 'always', 'queue', 'off'];
 export const DEPLOY_ON = ['branch', 'tag', 'manual'];
 export const IMAGE_TAGS = ['branch', 'tag', 'semver', 'latest'];
 export const SEVERITIES = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+/** How GitHub signs in to a cloud (Artifact Registry/Cloud Run, ECR/ECS, ACR/Azure): short-lived OIDC tokens, or stored keys. */
+export const CLOUD_AUTH = ['oidc', 'keys'];
 export const REGISTRY_CHOICES = Object.keys(REGISTRIES);
 export const registryInfo = () =>
-  Object.entries(REGISTRIES).map(([id, r]) => ({ id, label: r.label, serverLogin: Boolean(r.github.env) }));
+  Object.entries(REGISTRIES).map(([id, r]) => ({ id, label: r.label, serverLogin: Boolean(r.github.env), oidc: Boolean(r.authTarget) }));
 export const providerInfo = () =>
   Object.entries(CI_FILES).map(([id, c]) => ({ id, label: c.label, builtinRegistry: Boolean(c.builtinRegistry), features: c.features }));
 export const targetIds = () => Object.keys(TARGETS);
@@ -133,6 +135,13 @@ export function buildPipeline(opts, { appName, composeFile, composeFor = () => [
   oneOf('CI service', services, Object.keys(DBS));
   oneOf('image tag', imageTags, IMAGE_TAGS);
   oneOf('scan severity', scanSeverity, SEVERITIES);
+  const cloudAuth = opts.cloudAuth ?? 'oidc';
+  oneOf('cloud auth', [cloudAuth], CLOUD_AUTH);
+  if (services.length && provider.features.includes('services')) {
+    notes.push(
+      `The CI service containers use the throwaway password "${CI_PASSWORD}" (they live for one job and hold test data only)${services.includes('redis') ? '; the CI redis has no password, as service containers cannot pass redis-server arguments' : ''}.`,
+    );
+  }
   if (os.some((o) => !o.startsWith('ubuntu')) && services.length) {
     throw new Error('CI service containers need Linux runners: remove the Windows/macOS test runners');
   }
@@ -174,6 +183,10 @@ export function buildPipeline(opts, { appName, composeFile, composeFor = () => [
   const sign = unsupported('sign', 'Image signing (cosign)', opts.sign);
   const codeScan = unsupported('codeScan', 'Code scanning', opts.codeScan);
   const hasPermissions = unsupported('permissions', 'Token permissions', permissions.length);
+  const extraScopes = permissions.filter((perm) => perm !== 'id-token-write');
+  if (hasPermissions && extraScopes.length) {
+    notes.push(`The extra token permissions (${extraScopes.join(', ')}) are granted to the image and deploy jobs only; the jobs that run the code (tests, lint, change detection) keep the read-only default.`);
+  }
   unsupported('os', 'The test OS matrix', os.length);
   unsupported('platforms', 'Multi-platform builds', platforms.length > 1);
   unsupported('release', 'The release trigger', triggers.release);
@@ -210,9 +223,17 @@ export function buildPipeline(opts, { appName, composeFile, composeFor = () => [
   // A cloud registry picked for a generic target signs in with the matching cloud target's steps.
   const authTarget = chooses && REGISTRIES[registryId]?.authTarget ? TARGETS[REGISTRIES[registryId].authTarget] : target;
 
-  const oidc = providerId === 'github' && Boolean(authTarget.oidc) && permissions.includes('id-token-write');
+  // OIDC is the default on GitHub; the id-token permission still forces it, as it did before the option existed.
+  const oidc = providerId === 'github' && Boolean(authTarget.oidc) && (cloudAuth === 'oidc' || permissions.includes('id-token-write'));
   if (providerId === 'github' && permissions.includes('id-token-write') && !authTarget.oidc) {
     notes.push('The id-token permission only matters for cloud registries and targets (Artifact Registry, ECR, ACR), where it switches login to OIDC.');
+  }
+  if (oidc) {
+    notes.push(
+      'Cloud login uses OIDC (short-lived tokens, no stored cloud keys): trust this repository in the cloud first (a Workload Identity provider on GCP, an IAM role with the GitHub OIDC provider on AWS, a federated credential on the Azure app registration), scoped to the environment or branch that deploys. Choose stored keys (--cloud-auth keys) to use a key instead.',
+    );
+  } else if (providerId === 'github' && authTarget.oidc) {
+    notes.push('Cloud login uses a stored long-lived key; OIDC (--cloud-auth oidc) avoids keeping one in GitHub.');
   }
   if (providerId !== 'github' && authTarget.oidc) notes.push(`${provider.label} authenticates to the cloud with stored keys; OIDC login is GitHub-only here.`);
 
@@ -279,6 +300,11 @@ export function buildPipeline(opts, { appName, composeFile, composeFor = () => [
     const where = provider.secretsLocation;
     notes.push(`Add to ${where}: ${[secrets && `secrets ${secrets}`, vars && `variables ${vars}`].filter(Boolean).join('; ')}.`);
   }
+  // Secrets only the deploy job reads (cloud targets also sign in from the image job, so theirs are shared): where to keep them.
+  const deploySecrets = deploys && !target.oidc ? targetNeeds.secrets : [];
+  if (deploySecrets.length && provider.deploySecretsNote) {
+    notes.push(provider.deploySecretsNote({ secrets: deploySecrets.join(', '), environments: deployments.map((d) => d.name).join(', ') }));
+  }
   notes.push(...(target.notes?.() ?? []), ...(provider.notes?.({ triggers }) ?? []));
 
   return {
@@ -295,7 +321,7 @@ export function buildPipeline(opts, { appName, composeFile, composeFor = () => [
     failFast: Boolean(opts.failFast ?? false),
     pipelineEnv,
     imageTags,
-    pinActions: provider.features.includes('pinActions') && opts.pinActions !== false, // GitHub only; Gitea runners may not resolve SHAs
+    pinActions: provider.features.includes('pinActions') && opts.pinActions !== false, // GitHub and Gitea (act_runner fetches full SHAs)
     depCache: opts.depCache !== false,
     layerCache: opts.layerCache !== false,
     scanSeverity,

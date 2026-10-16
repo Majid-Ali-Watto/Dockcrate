@@ -48,3 +48,42 @@ test('the editor lives at /generator and / is the landing page', () => {
   assert.ok(!existsSync(new URL('loading.jsx', app)));
   assert.match(readFileSync(new URL('page.jsx', app), 'utf8'), /<Home \/>/);
 });
+
+test('the developer and related-tool links are absolute https URLs', async () => {
+  const { DEVELOPER, RELATED_TOOLS } = await import('../lib/home.js');
+  for (const { url } of [DEVELOPER, ...RELATED_TOOLS]) assert.equal(new URL(url).protocol, 'https:', url);
+});
+
+test('privacy and terms pages: unique copy, a route folder each, in the footer and the sitemap', async () => {
+  const { LEGAL } = await import('../lib/legal.js');
+  assert.deepEqual(LEGAL.map((p) => p.slug), ['privacy', 'terms']);
+  const app = new URL('../app/', import.meta.url);
+  for (const page of LEGAL) {
+    assert.ok(page.description.length >= 70 && page.description.length <= 160, `${page.slug}: description length ${page.description.length}`);
+    assert.ok(!LANDING.some((l) => l.slug === page.slug));
+    assert.match(readFileSync(new URL(`${page.slug}/page.jsx`, app), 'utf8'), new RegExp(`legalMetadata\\('${page.slug}'\\)[\\s\\S]*<Legal slug="${page.slug}" />`));
+  }
+  assert.match(readFileSync(new URL('../components/SiteFooter.jsx', import.meta.url), 'utf8'), /LEGAL\.map/);
+  assert.match(readFileSync(new URL('sitemap.js', app), 'utf8'), /LEGAL\.map/);
+});
+
+test('the privacy page names the browser storage keys the app really uses', async () => {
+  const { LEGAL } = await import('../lib/legal.js');
+  const privacy = JSON.stringify(LEGAL.find((p) => p.slug === 'privacy'));
+  const form = readFileSync(new URL('../lib/form.js', import.meta.url), 'utf8');
+  const layout = readFileSync(new URL('../app/layout.jsx', import.meta.url), 'utf8');
+  const key = form.match(/STORAGE_KEY\s*=\s*'([^']+)'/)?.[1];
+  assert.ok(key && privacy.includes(key), `privacy must name ${key}`);
+  assert.ok(layout.includes('dockcrate-theme') && privacy.includes('dockcrate-theme'));
+});
+
+test('links to other sites open in a new tab, through ExternalLink', () => {
+  const dir = new URL('../components/', import.meta.url);
+  for (const file of ['Home.jsx', 'Landing.jsx', 'Legal.jsx', 'SiteFooter.jsx', 'SiteHeader.jsx', 'GuidesNav.jsx']) {
+    const source = readFileSync(new URL(file, dir), 'utf8');
+    assert.ok(!/<a\b[^>]*href=(?:"https?:|\{[^}]*(?:\.url|link\[0\]))/.test(source), `${file}: an external link must use <ExternalLink>`);
+  }
+  const link = readFileSync(new URL('ExternalLink.jsx', dir), 'utf8');
+  assert.match(link, /target="_blank"/);
+  assert.match(link, /rel="noopener noreferrer"/);
+});

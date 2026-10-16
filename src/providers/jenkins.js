@@ -1,5 +1,6 @@
 import { block, changedLines, defaultBranch, deployPlan, dockerRunDeploy, healthCmd, isMulti, manualLabel, serviceEnv, serviceUrl, shellPlan, switchOn, switchVar } from './common.js';
 import { DBS } from '../compose.js';
+import { VERSIONS } from '../tools.js';
 
 const REF = ['REF_SLUG=$(printf "%s" "${BRANCH_NAME:-$TAG_NAME}" | tr -c "A-Za-z0-9_.\\n-" "-")'];
 
@@ -69,16 +70,18 @@ function render(p) {
       const versions = app.versions.length ? app.versions : [null];
       versions.forEach((v) => {
         const tp = shellPlan(p, app, vars, { version: v ?? undefined });
-        const env = Object.fromEntries(p.services.map((n) => serviceUrl(n, 'localhost', p.services)));
+        // Service containers join a network of this build only and are reached by name (postgres:5432), never on the agent's host network.
+        const env = Object.fromEntries(p.services.map((n) => serviceUrl(n, n, p.services)));
         const cname = (n) => `dockcrate-$BUILD_TAG-${n}`;
-        const start = p.services.flatMap((n) => {
+        const net = 'dockcrate-$BUILD_TAG';
+        const start = [p.services.length > 0 && `docker network create "${net}"`].filter(Boolean).concat(p.services.flatMap((n) => {
           const db = DBS[n];
           const envs = Object.entries(serviceEnv(n)).map(([k, val]) => `-e "${k}=${val}"`).join(' ');
           return [
-            `docker run -d --name "${cname(n)}" --network host ${envs} --health-cmd "${healthCmd(n)}" --health-interval 5s --health-timeout 5s --health-retries 10 ${db.image}`,
+            `docker run -d --name "${cname(n)}" --network "${net}" --network-alias ${n} ${envs} --health-cmd "${healthCmd(n)}" --health-interval 5s --health-timeout 5s --health-retries 10 ${db.image}`,
             `for i in $(seq 1 60); do [ "$(docker inspect -f '{{.State.Health.Status}}' "${cname(n)}")" = healthy ] && break; sleep 2; done`,
           ];
-        });
+        }));
         const stop = p.services.map((n) => `"${cname(n)}"`).join(' ');
         const parts = [multi && app.id, v];
         const title = ['Test', ...parts.filter(Boolean)].join(' ');
@@ -92,12 +95,12 @@ function render(p) {
           '      steps {',
           '        script {',
           p.services.length > 0 && shBlock(start, '          '),
-          `          docker.image('${g(tp.testImage)}').inside('--network host') {`,
+          p.services.length > 0 ? `          docker.image('${g(tp.testImage)}').inside("--network dockcrate-\${env.BUILD_TAG}") {` : `          docker.image('${g(tp.testImage)}').inside {`,
           tp.testCommands.length > 0 ? tp.testCommands.map((c) => sh(c, '            ')) : "            echo 'No test steps selected'",
           '          }',
           '        }',
           '      }',
-          p.services.length > 0 && ['      post {', '        always {', `          sh 'docker rm -f ${stop} || true'`, '        }', '      }'],
+          p.services.length > 0 && ['      post {', '        always {', `          sh 'docker rm -f ${stop} || true; docker network rm "dockcrate-$BUILD_TAG" || true'`, '        }', '      }'],
           '    }',
         ]);
       });
@@ -107,7 +110,7 @@ function render(p) {
     names.push('lint');
     stage('lint', 'lint dockerfile', [
       "    stage('Lint Dockerfile') {",
-      agent(`docker { image 'hadolint/hadolint:latest-debian'${label ? `; ${label}` : ''}; args '--entrypoint=' }`).map((l) => `      ${l}`),
+      agent(`docker { image '${VERSIONS.hadolint}'${label ? `; ${label}` : ''}; args '--entrypoint=' }`).map((l) => `      ${l}`),
       '      steps {',
       plans.map(({ plan }) => sh(plan.lintDockerfile, '        ')),
       '      }',
@@ -163,9 +166,12 @@ export const jenkins = {
   builtinRegistry: false,
   secretsLocation: 'Jenkins (Manage Jenkins > Credentials: one "Secret text" credential per secret, with the same id; plain variables as global environment variables)',
   features: ['manual', 'schedule', 'services', 'timeout', 'runner'],
+  deploySecretsNote: ({ secrets }) =>
+    `Store ${secrets} as credentials of this job's folder (Folder > Credentials), not global ones, so other jobs cannot bind them, and limit who can configure the job or replay its Pipeline.`,
   notes: () => [
     'Jenkins decides which branches, tags and pull requests get built in the multibranch job (Branch Sources > Behaviours) and its webhook, not in the Jenkinsfile; the Jenkinsfile only filters stages (images are not pushed for pull requests, deploys follow the deploy rule).',
-    'Needs the Docker Pipeline plugin, and agents with Docker access (the image and deploy stages mount /var/run/docker.sock). Test service containers use host networking, so two builds of the same project must not share an agent at the same time.',
+    'Needs the Docker Pipeline plugin, and agents with Docker access. Test service containers run on a network of their own per build, reached by name.',
+    'The image stage mounts the agent\'s Docker socket and runs as root in its container: anything that stage runs controls the Docker daemon, which is root on the agent. Run it on a dedicated agent (give it a label and set the runner option) that builds nothing else and holds no other credentials.',
   ],
   render,
 };

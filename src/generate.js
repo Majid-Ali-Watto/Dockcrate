@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { constants, existsSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { basename, isAbsolute, join } from 'node:path';
 import { STACKS } from './stacks/index.js';
 import { CI_FILES, CI_STEPS, buildPipeline, parseDeploySpec } from './ci.js';
 import { TARGETS } from './deploy.js';
 import { DBS, RESTART_POLICIES, assignDatabases, networksOf, parseNetworks, assignHostPorts, composeFile, composeOverride, dbInitFiles, envExample, isDevEnv, overrideName, usedDbs } from './compose.js';
 import { deployApps } from './deploy.js';
-import { appSlug, findStack, normalizeServices, parseServiceSpec, stackIds } from './services.js';
+import { appSlug, findStack, normalizeServices, parseServiceSpec, stackIds, unsafeSegment } from './services.js';
 import { lines } from './fsutil.js';
 import { EXTRAS, extraFiles } from './extras.js';
 import { assemble, splitBlocks } from './blocks.js';
@@ -30,6 +30,21 @@ const COMMON_IGNORE = [
   '.vscode',
   '.idea',
 ];
+// Secrets anywhere in the context, not only at its root. Appended after the stack's own lines so the ids of the existing
+// lines (blocks are per line, numbered) do not shift; .env.example stays in, as before.
+const SECRET_IGNORE = [
+  '**/.env',
+  '**/.env.*',
+  '!**/.env.example',
+  '**/*.pem',
+  '**/*.key',
+  '**/id_rsa*',
+  '**/id_ed25519*',
+  '**/.npmrc',
+  '**/.pypirc',
+  '**/.aws',
+  '**/.ssh',
+];
 
 // Compose accepts several file names; reuse the one the project already has instead of adding a duplicate.
 const COMPOSE_NAMES = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yaml', 'compose.yml'];
@@ -47,7 +62,7 @@ const SAFE = {
   buildDir: /^[\w./-]+$/,
 };
 
-export { PERMISSIONS, TEST_OS, PLATFORMS, CONCURRENCY, DEPLOY_ON, IMAGE_TAGS, SEVERITIES, REGISTRY_CHOICES, targetIds, targetInfo, registryInfo, providerInfo } from './ci.js';
+export { PERMISSIONS, CLOUD_AUTH, TEST_OS, PLATFORMS, CONCURRENCY, DEPLOY_ON, IMAGE_TAGS, SEVERITIES, REGISTRY_CHOICES, targetIds, targetInfo, registryInfo, providerInfo } from './ci.js';
 
 export const dbIds = () => Object.keys(DBS);
 export const ciIds = () => Object.keys(CI_FILES);
@@ -157,6 +172,7 @@ function resolveServices(opts) {
   const services = normalizeServices(opts.services).map((spec) => {
     const unknown = Object.keys(spec).find((k) => !SERVICE_KEYS.includes(k));
     if (unknown) throw new Error(`service ${spec.name}: unknown option "${unknown}"`);
+    checkSizes(spec, `service ${spec.name}: `);
     const o = { ...opts, ...Object.fromEntries(SERVICE_KEYS.filter((k) => spec[k] != null && k !== 'name' && k !== 'dir').map((k) => [k, spec[k]])), name: spec.project };
     delete o.services;
     for (const [key, pattern] of Object.entries(SAFE)) {
@@ -185,7 +201,44 @@ function checkDbs(list) {
 
 const ENV_NAME = /^[a-z][a-z0-9-]*$/;
 
+/**
+ * Size limits, so a request cannot ask for an enormous output (services x deployments x ...). Shared by the CLI and the
+ * API. Any other list option is capped at MAX_LIST entries and any text option at MAX_TEXT characters.
+ */
+export const LIMITS = { services: 32, deployTo: 20, envs: 10, networks: 20 };
+const MAX_LIST = 50;
+const MAX_TEXT = 16 * 1024;
+// Text options that hold one entry per line (values may contain commas); any other text is counted as a comma list.
+const LINE_LISTS = new Set(['env', 'pipelineEnv', 'schedule']);
+const NOT_LISTS = new Set(['edits']);
+
+/** Throws when an option has too many entries or too much text; `where` prefixes the message (a service). */
+export function checkSizes(o, where = '') {
+  for (const [key, v] of Object.entries(o ?? {})) {
+    if (v == null || NOT_LISTS.has(key) || (where && key === 'services')) continue;
+    const max = LIMITS[key] ?? MAX_LIST;
+    let count = 0;
+    if (Array.isArray(v)) {
+      count = v.length;
+      for (const item of v) {
+        if (typeof item === 'string' && item.length > MAX_TEXT) throw new Error(`${where}${key}: an entry is longer than ${MAX_TEXT} characters`);
+      }
+    } else if (typeof v === 'string') {
+      if (v.length > MAX_TEXT) throw new Error(`${where}${key} is longer than ${MAX_TEXT} characters`);
+      count = v.split(LINE_LISTS.has(key) ? '\n' : key === 'packages' ? /[\s,]+/ : /[\n,]+/).filter((x) => x.trim()).length;
+    } else continue;
+    if (count > max) throw new Error(`${where}${key} has ${count} entries; at most ${max}`);
+  }
+}
+
+// Edits: how many files may be edited, blocks overridden or added per file, and custom files added.
+const MAX_EDITED_FILES = 500;
+const MAX_BLOCK_EDITS = 1000;
+const MAX_ADDED_BLOCKS = 200;
+const MAX_CUSTOM_FILES = 50;
+
 function validate(opts) {
+  checkSizes(opts);
   const ci = opts.ci ?? 'github';
   if (ci !== 'none' && !CI_FILES[ci]) throw new Error(`unknown --ci "${ci}"; choose ${ciIds().join(', ')} or none`);
   checkDbs(opts.db ?? []);
@@ -225,6 +278,14 @@ const MAX_CUSTOM = 32 * 1024;
  */
 function applyEdits(generated, edits, notes) {
   if (typeof edits !== 'object' || edits === null || Array.isArray(edits)) throw new Error('edits must be an object keyed by file path');
+  const edited = Object.entries(edits);
+  if (edited.length > MAX_EDITED_FILES) throw new Error(`edits cover ${edited.length} files; at most ${MAX_EDITED_FILES}`);
+  for (const [path, edit] of edited) {
+    if (edit == null) continue;
+    if (typeof edit !== 'object' || Array.isArray(edit)) throw new Error(`the edit of ${path} must be an object`);
+    if (edit.blocks != null && (typeof edit.blocks !== 'object' || Object.keys(edit.blocks).length > MAX_BLOCK_EDITS)) throw new Error(`the edit of ${path} changes too many blocks (at most ${MAX_BLOCK_EDITS})`);
+    if (edit.add != null && (!Array.isArray(edit.add) || edit.add.length > MAX_ADDED_BLOCKS)) throw new Error(`the edit of ${path} adds too many blocks (at most ${MAX_ADDED_BLOCKS})`);
+  }
   const files = [];
   for (const f of generated) {
     const r = assemble(f.blocks ?? splitBlocks(f.path, f.content), edits[f.path]);
@@ -232,9 +293,11 @@ function applyEdits(generated, edits, notes) {
     if (edits[f.path]?.disabled) continue;
     files.push({ kind: f.kind, path: f.path, content: r.content, blocks: r.blocks });
   }
-  for (const [path, edit] of Object.entries(edits)) {
+  let custom = 0;
+  for (const [path, edit] of edited) {
     if (generated.some((f) => f.path === path) || !edit?.add?.length) continue;
-    if (!CUSTOM_PATH.test(path) || path.split('/').includes('.git')) throw new Error(`invalid custom file path "${path}"`);
+    if (!CUSTOM_PATH.test(path) || path.split('/').some(unsafeSegment)) throw new Error(`invalid custom file path "${path}"`);
+    if (++custom > MAX_CUSTOM_FILES) throw new Error(`at most ${MAX_CUSTOM_FILES} custom files`);
     const r = assemble([], edit);
     if (r.content.length > MAX_CUSTOM) throw new Error(`custom file ${path} is too large`);
     files.push({ kind: 'custom', path, content: r.content, blocks: r.blocks });
@@ -364,6 +427,7 @@ export function generate(dir, opts = {}) {
     versions: u.versions,
     selected: u.selected,
     stackId: u.stack.id,
+    runAs: u.stack.runAs?.(u.info, u.build),
     ci: (v) => u.stack.ci(u.info, v, u.selected),
     dev: u.dev,
   }));
@@ -439,11 +503,11 @@ export function generate(dir, opts = {}) {
   });
   if (!opts.include || opts.include.includes('repo')) notes.push(...extras.notes);
 
-  const env = envExample(dbs);
+  const env = envExample(dbs, apps, perService);
   const generated = [
     ...units.flatMap((u) => [
       { kind: 'dockerfile', path: `${u.prefix}Dockerfile`, content: u.stack.dockerfile(u.info, u.port, u.c, u.build) },
-      { kind: 'dockerignore', path: `${u.prefix}.dockerignore`, content: lines(COMMON_IGNORE, envs.length > 0 && 'Dockerfile.*', typeof u.stack.ignore === 'function' ? u.stack.ignore(u.build, u.info) : u.stack.ignore) },
+      { kind: 'dockerignore', path: `${u.prefix}.dockerignore`, content: lines(COMMON_IGNORE, envs.length > 0 && 'Dockerfile.*', typeof u.stack.ignore === 'function' ? u.stack.ignore(u.build, u.info) : u.stack.ignore, SECRET_IGNORE) },
     ]),
     {
       kind: 'compose',
@@ -484,13 +548,61 @@ export function generate(dir, opts = {}) {
   };
 }
 
-/** Writes files under `dir`; existing files are kept unless `force`. Returns [{ path, status }]. */
+/**
+ * Writes files under `dir`; existing files are kept unless `force`. Returns [{ path, status }].
+ * Never writes through a symbolic link inside `dir` (a linked file or a linked folder on the way could point anywhere):
+ * every path is checked before anything is written, new files are created exclusively and forced ones are opened without
+ * following a link.
+ */
 export function writeFiles(dir, files, { force = false } = {}) {
+  mkdirSync(dir, { recursive: true });
+  const root = realpathSync(dir);
+  const parts = (path) => {
+    const segments = String(path).split('/');
+    if (isAbsolute(path) || segments.some((s) => s === '' || s === '.' || s === '..' || s.includes('\\'))) throw new Error(`refusing to write ${path}: not a plain relative path`);
+    return segments;
+  };
+  const kindOf = (p) => {
+    try {
+      return lstatSync(p);
+    } catch (err) {
+      if (err.code === 'ENOENT') return null;
+      throw err;
+    }
+  };
+  // Check everything first, so a refusal leaves the folder untouched.
+  for (const { path } of files) {
+    const segments = parts(path);
+    let at = root;
+    for (const [i, segment] of segments.entries()) {
+      at = join(at, segment);
+      const st = kindOf(at);
+      if (!st) break;
+      if (st.isSymbolicLink()) throw new Error(`refusing to write ${path}: ${segments.slice(0, i + 1).join('/')} is a symbolic link`);
+      if (i < segments.length - 1 && !st.isDirectory()) throw new Error(`refusing to write ${path}: ${segments.slice(0, i + 1).join('/')} is not a folder`);
+      if (i === segments.length - 1 && !st.isFile()) throw new Error(`refusing to write ${path}: it exists and is not a file`);
+    }
+  }
+  // O_NOFOLLOW where the platform has it (not on Windows, where the check above is what protects).
+  const overwrite = constants.O_NOFOLLOW ? constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW : 'w';
   return files.map(({ path, content }) => {
-    const target = join(dir, path);
-    if (existsSync(target) && !force) return { path, status: 'skipped' };
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, content);
+    const segments = parts(path);
+    let at = root;
+    for (const segment of segments.slice(0, -1)) {
+      at = join(at, segment);
+      const st = kindOf(at);
+      if (!st) mkdirSync(at);
+      else if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`refusing to write ${path}: ${segment} is not a folder`);
+    }
+    const target = join(at, segments.at(-1));
+    if (!force && kindOf(target)) return { path, status: 'skipped' };
+    try {
+      writeFileSync(target, content, { flag: force ? overwrite : 'wx' });
+    } catch (err) {
+      if (err.code === 'EEXIST') return { path, status: 'skipped' };
+      if (err.code === 'ELOOP') throw new Error(`refusing to write ${path}: it is a symbolic link`);
+      throw err;
+    }
     return { path, status: 'written' };
   });
 }

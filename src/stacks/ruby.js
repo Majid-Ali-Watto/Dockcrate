@@ -1,5 +1,5 @@
 import { lines } from '../fsutil.js';
-import { DEFAULT_BUILD, apt, envLines, healthcheck, pkgs } from '../container.js';
+import { DEFAULT_BUILD, DEV_ROOT, apt, envLines, healthcheck, pkgs, runAsOf, systemUser, userLine } from '../container.js';
 
 const DEFAULT_VERSION = '3.4';
 const mentions = (i, gem) => new RegExp(`^\\s*gem\\s+['"]${gem}['"]`, 'm').test(i.gemfile);
@@ -21,6 +21,8 @@ const command = (i, port) =>
     : mentions(i, 'puma')
       ? ['bundle', 'exec', 'puma', '-b', `tcp://0.0.0.0:${port}`]
       : ['bundle', 'exec', 'rackup', '--host', '0.0.0.0', '--port', String(port)];
+
+const WRITABLE = ['tmp', 'log', 'storage'];
 
 const testCommand = (i) => (i.rspec ? 'bundle exec rspec' : i.rails ? 'bin/rails test' : 'bundle exec rake test');
 const precompiles = (i) => i.rails && !i.apiOnly && (mentions(i, 'sprockets-rails') || mentions(i, 'propshaft') || mentions(i, 'sprockets'));
@@ -59,6 +61,7 @@ export const ruby = {
     return {
       dockerfile: lines(
         '# syntax=docker/dockerfile:1',
+        DEV_ROOT,
         `FROM ruby:${i.version}-slim`,
         apt({ packages: libs }),
         'WORKDIR /app',
@@ -84,7 +87,9 @@ export const ruby = {
       alpine
         ? `RUN apk add --no-cache ${list.join(' ')}`
         : ['RUN apt-get update \\', `    && apt-get install -y --no-install-recommends ${list.join(' ')} \\`, '    && rm -rf /var/lib/apt/lists/*'];
-    const user = alpine ? 'RUN addgroup -S -g 10001 app && adduser -S -u 10001 -G app app' : 'RUN useradd --system --uid 10001 --create-home app';
+    const user = systemUser(v, { home: true });
+    // The code belongs to root; Rails only writes to tmp/ (pids, cache), log/ and storage/ (Active Storage on disk).
+    const writable = `RUN mkdir -p ${WRITABLE.join(' ')} && chown -R app:app ${WRITABLE.join(' ')}`;
     const probe = alpine ? 'wget' : 'tcp';
     const bundle = 'ENV BUNDLE_DEPLOYMENT=1 BUNDLE_PATH=/usr/local/bundle BUNDLE_WITHOUT="development:test"';
     const gemfiles = `COPY Gemfile Gemfile.lock* ${i.rubyVersionFile ? '.ruby-version ' : ''}./`;
@@ -107,9 +112,10 @@ export const ruby = {
         'RUN ' + (alpine ? `apk add --no-cache --virtual .build ${compilers.join(' ')}` : `apt-get update && apt-get install -y --no-install-recommends ${compilers.join(' ')}`) + ' \\',
         `    && bundle install && ${clean} \\`,
         `    && ${cleanup}`,
-        'COPY --chown=app:app . .',
+        'COPY . .',
         precompiles(i) && 'RUN SECRET_KEY_BASE_DUMMY=1 bundle exec rails assets:precompile',
-        'USER app',
+        writable,
+        userLine(),
         tail,
       );
     }
@@ -125,9 +131,10 @@ export const ruby = {
         'WORKDIR /app',
         gemfiles,
         `RUN bundle install && ${clean}`,
-        'COPY --chown=app:app . .',
+        'COPY . .',
         precompiles(i) && 'RUN SECRET_KEY_BASE_DUMMY=1 bundle exec rails assets:precompile',
-        'USER app',
+        writable,
+        userLine(),
         tail,
       );
     }
@@ -149,14 +156,16 @@ export const ruby = {
       user,
       'WORKDIR /app',
       'COPY --from=build /usr/local/bundle /usr/local/bundle',
-      'COPY --from=build --chown=app:app /app ./',
-      'USER app',
+      'COPY --from=build /app ./',
+      writable,
+      userLine(),
       tail,
     );
   },
   variants: ['alpine', 'slim'],
   defaultVariant: 'slim',
   healthKind: (b) => (b.variant === 'alpine' ? 'wget' : 'tcp'),
+  runAs: () => runAsOf(10001, { writable: WRITABLE.map((d) => `/app/${d}`) }),
   buildNotes: (i, b) => [
     b.variant === 'alpine' && 'Alpine uses musl: gems with native extensions compile against it (pg and mysql2 are covered; add other libraries under OS packages) and a few gems with precompiled binaries have no musl build.',
     b.mode === 'production' && 'Production only: one stage with production gems only; the compilers are installed and removed in the same layer, so the image has none.',

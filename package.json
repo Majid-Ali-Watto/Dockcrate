@@ -2,6 +2,7 @@
   "name": "dockcrate",
   "version": "0.1.0",
   "description": "Generate Dockerfile, compose and CI/CD files for a new project (CLI + Next.js UI)",
+  "author": "Majid Ali (https://majidev.netlify.app/)",
   "type": "module",
   "bin": {
     "dockcrate": "bin/dockcrate.js"

@@ -1,0 +1,8 @@
+{
+  "name": "dockcrate-deploy-tools",
+  "private": true,
+  "description": "The Vercel CLI the deploy workflow runs, pinned with a lockfile (npm ci --ignore-scripts) instead of npx.",
+  "dependencies": {
+    "vercel": "59.26.0"
+  }
+}

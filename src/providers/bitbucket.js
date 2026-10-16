@@ -1,5 +1,6 @@
-import { block, changedGuard, changedLines, cmd, defaultBranch, deployPlan, dockerRunDeploy, isClassicDeploy, isMulti, mapLines, q, serviceEnv, serviceUrl, shellPlan, switchOn, switchVar } from './common.js';
+import { block, changedGuard, changedLines, cmd, defaultBranch, deployPlan, dockerRunDeploy, exportLine, isClassicDeploy, isMulti, mapLines, q, serviceEnv, serviceUrl, shellPlan, switchOn, switchVar } from './common.js';
 import { DBS } from '../compose.js';
+import { VERSIONS } from '../tools.js';
 
 const REF = [
   'REF_SLUG=$(printf "%s" "${BITBUCKET_BRANCH:-$BITBUCKET_TAG}" | tr -c "A-Za-z0-9_.\\n-" "-")',
@@ -14,7 +15,7 @@ function render(p) {
   const several = p.deployments.length > 1;
   const deployAnchor = (d) => (several ? `deploy-step-${d.name}` : 'deploy-step');
   const anchor = (base, app) => (multi ? `${base}-${app.id}` : base);
-  const exportEnv = p.pipelineEnv.map(([k, v]) => `export ${k}=${JSON.stringify(v)}`);
+  const exportEnv = p.pipelineEnv.map(exportLine);
   const timeout = p.timeout ? `        max-time: ${p.timeout}` : null;
   const blocks = [];
   blocks.push(block('image', 'Default image', 'image: atlassian/default-image:4', false));
@@ -70,7 +71,7 @@ function render(p) {
   }
   const testIds = [];
   if (p.testJob) {
-    const serviceEnvLines = p.services.map((n) => serviceUrl(n, 'localhost', p.services)).map(([k, v]) => `export ${k}=${JSON.stringify(v)}`);
+    const serviceEnvLines = p.services.map((n) => serviceUrl(n, 'localhost', p.services)).map(exportLine);
     for (const app of p.apps) {
       const versions = app.versions.length ? app.versions : [null];
       versions.forEach((v) => {
@@ -86,7 +87,7 @@ function render(p) {
     }
   }
   if (p.lintDockerfile) {
-    step('lint', 'lint Dockerfile', [...header('Lint Dockerfile', 'lint', ['        image: hadolint/hadolint:latest-debian', timeout].filter(Boolean)), ...script(plans.map(({ plan }) => plan.lintDockerfile))]);
+    step('lint', 'lint Dockerfile', [...header('Lint Dockerfile', 'lint', [`        image: ${VERSIONS.hadolint}`, timeout].filter(Boolean)), ...script(plans.map(({ plan }) => plan.lintDockerfile))]);
   }
   if (registry) {
     for (const { app, plan } of plans) {
@@ -159,6 +160,8 @@ export const bitbucket = {
   builtinRegistry: false,
   secretsLocation: 'Bitbucket (Repository settings > Pipelines > Repository variables; mark the secrets as secured)',
   features: ['manual', 'services', 'timeout', 'schedule'],
+  deploySecretsNote: ({ secrets, environments }) =>
+    `Keep ${secrets} as secured deployment variables of ${environments} (Repository settings > Deployments), not repository variables: only the deploy step, which names the deployment, sees them. Restrict who and which branches can deploy to it (deployment permissions, on Premium).`,
   notes: ({ triggers }) => [
     'Bitbucket allows 4 steps per service total and 3 service containers (Docker counts as one) per step.',
     triggers.schedule.length && `Bitbucket schedules live in the UI: Pipelines > Schedules, with cron "${triggers.schedule[0]}".`,
