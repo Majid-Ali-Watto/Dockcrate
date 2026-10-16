@@ -1,19 +1,12 @@
-import { headers } from 'next/headers';
-import { notFound } from 'next/navigation';
-import App from '../components/App.jsx';
-import { getMeta, guard } from '../src/api.js';
+import Home from '../components/Home.jsx';
 import { siteOrigin } from '../lib/site.js';
+import { PROVIDERS, STACKS, TARGETS } from '../lib/home.js';
 import pkg from '../package.json' with { type: 'json' };
 
-// Rendered per request: the page embeds the folder `dockcrate serve` was started in.
+// Rendered per request: the Host check and the canonical origin come from the request.
 export const dynamic = 'force-dynamic';
 
 export default async function Page() {
-  try {
-    guard(await headers()); // same Host/Origin rules as the API, so a rebinding page cannot read your paths
-  } catch {
-    notFound();
-  }
   const origin = await siteOrigin();
   const jsonLd = JSON.stringify({
     '@context': 'https://schema.org',
@@ -26,12 +19,18 @@ export default async function Page() {
     softwareVersion: pkg.version,
     image: `${origin}/og-image.png`,
     logo: `${origin}/icons/icon-512.png`,
-    featureList: ['Dockerfile and .dockerignore', 'docker-compose with services', 'CI/CD for seven providers', 'Kubernetes, ECS, Cloud Run, Fly and Azure deploys'],
+    featureList: [
+      'Dockerfile and .dockerignore',
+      'docker-compose with services',
+      `CI/CD for ${PROVIDERS.length} providers`,
+      `${STACKS.length} stacks`,
+      `${TARGETS.length} deployment options: Kubernetes, ECS, Cloud Run, Fly, Azure and SSH`,
+    ],
     offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
   });
   return (
     <>
-      <App meta={getMeta()} />
+      <Home />
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLd }} />
     </>
   );

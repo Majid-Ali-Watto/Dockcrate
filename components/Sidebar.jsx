@@ -6,7 +6,7 @@ import Networks from './Networks.jsx';
 import Services from './Services.jsx';
 import { LABELS, PRESETS, RUNNERS, RUNTIMES } from '../lib/form.js';
 
-export default function Sidebar({ form, set, meta, show, result, loading, onBrowse }) {
+export default function Sidebar({ form, set, meta, show, result, loading }) {
   const { stack } = show;
   const stackOptions = opts(meta.stacks.map((s) => s.id));
   const selectedSteps = form.ciSteps ?? (show.multi ? [...new Set(result?.services?.flatMap((svc) => svc.ci.selected) ?? [])] : result?.ci?.selected) ?? [];
@@ -16,22 +16,6 @@ export default function Sidebar({ form, set, meta, show, result, loading, onBrow
 
   return (
     <div className="sidebar-body">
-      {!meta.hosted && (
-        <Field
-          label="Add the files to a project (optional)"
-          hint="Pick the project folder, or paste a path (~ works). The files are written straight into it; ones that already exist are kept unless you tick Overwrite. A folder that does not exist yet is created. Leave empty to preview, copy or download."
-        >
-          {(id) => (
-            <div className="pathrow">
-              <input id={id} type="text" value={form.dir} spellCheck={false} autoComplete="off" onChange={(e) => set('dir', e.target.value)} />
-              <button type="button" onClick={onBrowse}>
-                Browse…
-              </button>
-            </div>
-          )}
-        </Field>
-      )}
-
       <CheckGroup
         legend="Files to generate"
         options={opts(meta.kinds.filter((k) => k !== 'deploy' || show.deployConfig), LABELS.kinds)}
@@ -57,7 +41,7 @@ export default function Sidebar({ form, set, meta, show, result, loading, onBrow
 
       {show.tool && (
         <SelectField
-          label="Package manager / build tool"
+          label="Package manager"
           value={form.tool || stack.tools[0]}
           onChange={(v) => set('tool', v)}
           options={opts(stack.tools)}

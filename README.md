@@ -1,6 +1,6 @@
 # Dockcrate
 
-Generates the Dockerfile, `.dockerignore`, `docker-compose.yml`, CI/CD pipeline and deployment config for a **new project**: you choose the stack and the options, preview the files, then download them or add them straight into a project folder. Nothing is read from an existing project. Two front ends share one generator: a **CLI** and a **Next.js web UI**.
+Generates the Dockerfile, `.dockerignore`, `docker-compose.yml`, CI/CD pipeline and deployment config for a **new project**: you choose the stack and the options, preview the files, then copy or download them (the CLI writes them into a project folder). Nothing is read from an existing project. Two front ends share one generator: a **CLI** and a **Next.js web UI**.
 
 ```sh
 npm install                   # once (the CLI itself needs nothing; the web UI needs Next)
@@ -8,21 +8,21 @@ npm link                      # puts `dockcrate` on your PATH (or: node bin/dock
 
 dockcrate --stack react --tool pnpm ./shop            # write the files into ./shop (created if missing)
 dockcrate --stack django --dry-run                    # print them instead
-dockcrate serve                     # web UI at http://localhost:4173
+dockcrate serve                     # web UI at http://localhost:4173/generator (the landing page is at /)
 ```
 
 ## Web UI
 
-`dockcrate serve` runs the Next.js app (`next start`, bound to 127.0.0.1). It rebuilds itself first when the sources are newer than the build. `npm run dev` runs it in development mode.
+`dockcrate serve` runs the Next.js app (`/` is the landing page, the editor is at `/generator`) (`next start`, bound to 127.0.0.1). It rebuilds itself first when the sources are newer than the build. `npm run dev` runs it in development mode.
 
-The UI fills the window: controls on the left (scrolling on their own), a live preview on the right. Controls appear only when they apply: a static site has no database or OS-package options, FastAPI has no build-folder field, GitLab hides GitHub-only settings, unticking the CI file group hides CI, deployment and trigger options, and a file that is not in the project folder yet is shown full width with no empty "Existing" pane.
+The UI fills the window: controls on the left (scrolling on their own), a live preview on the right. Controls appear only when they apply: a static site has no database or OS-package options, FastAPI has no build-folder field, GitLab hides GitHub-only settings, and unticking the CI file group hides CI, deployment and trigger options.
 
-- **A project**: pick stack, package manager / build tool, name, runtime and the rest. **Add the files to a project** (optional) takes the project folder (**Browse…** or paste a path): **Write files to folder** puts them straight into it, creating the folder if needed. Each generated file is shown next to the file already in that folder, with changed lines highlighted, and existing files are never overwritten unless you tick **Overwrite**. Without a folder, copy or download the files.
-- **Several services**: **Split into several services** opens a **Services** panel (name, folder, stack, port and optional own databases per service, add / remove / back to one service). **Environments** adds a compose file per environment. Both show skeleton placeholders while the page, the preview or the block editor are still loading.
+- **A project**: pick stack, package manager / build tool, name, runtime and the rest. Copy each file or download them all as a `.zip`.
+- **Several services**: **Split into several services** opens a **Services** panel (name, folder, stack, runtime version, package manager, port and optional own databases per service, add / remove / back to one service). **Environments** adds a compose file per environment. Both show skeleton placeholders while the page, the preview or the block editor are still loading.
 
-The page is built to score 100 in Lighthouse (performance, accessibility, best practices, SEO), on mobile and desktop: metadata, Open Graph / Twitter card, canonical, `robots.txt`, `sitemap.xml`, web manifest, favicon and app icons, JSON-LD; a nonce-based Content-Security-Policy (`proxy.js`) plus frame/sniffing/referrer headers (`next.config.mjs`); gzip on large API responses; a light / dark / system theme switch.
+The page is built to score 100 in Lighthouse (performance, accessibility, best practices, SEO), on mobile and desktop: metadata, Open Graph / Twitter card, canonical, `robots.txt`, `sitemap.xml`, web manifest, favicon and app icons, JSON-LD, and four server-rendered guide pages (Dockerfile, Docker Compose, GitHub Actions and CI/CD pipeline generators) that show real generator output; a nonce-based Content-Security-Policy (`proxy.js`) plus frame/sniffing/referrer headers (`next.config.mjs`); gzip on large API responses; a light / dark / system theme switch.
 
-The API is Next route handlers (`app/api/*`) over `src/api.js`. It only answers requests whose `Host` is localhost and whose `Origin` (if any) is the same origin, and it can only write the generated file names into the folder you give it.
+The API is Next route handlers (`app/api/*`) over `src/api.js`. It only answers requests whose `Host` is localhost and whose `Origin` (if any) is the same origin, and it never reads or writes the server's disk: it only returns the generated files.
 
 ## What you can control
 
@@ -192,16 +192,15 @@ Vercel has no "deploy this image" flag, so the deploy step is a `Dockerfile.verc
 
 - GitHub variables `VERCEL_TEAM_ID`, `VERCEL_TEAM_SLUG`, `VERCEL_PROJECT_ID`, `VERCEL_PROJECT_NAME`, and the secret `VERCEL_TOKEN`; a GitHub environment named `production`;
 - on the Vercel team, a VCR OIDC policy with read-write access to the project (the push logs in with GitHub OIDC, no stored key);
-- on the Vercel project, the Framework Preset "Container" (with "Other" the deployment is Ready but serves a 404); `SITE_URL` is optional (see `.env.example`).
+- on the Vercel project, the Framework Preset "Container" (with "Other" the deployment is Ready but serves a 404); `SITE_URL` is optional (see `.env.example`); this repo's `Dockerfile` sets it to `https://dockcrate.vercel.app`, so the live site's canonical, Open Graph, sitemap and robots URLs never depend on the host of a request (change it there if the site moves to another domain).
 
 The image sets `DOCKCRATE_HOSTED=1` itself (a container may not get Vercel's `VERCEL` variable). `docker run -p 3000:3000` works anywhere else.
 
-A server you don't own has no project folders, so the hosted site runs in **hosted mode** (switched on by Vercel's `VERCEL` variable, or by `DOCKCRATE_HOSTED=1`, which the `Dockerfile` sets):
+The hosted site runs in **hosted mode** (switched on by Vercel's `VERCEL` variable, or by `DOCKCRATE_HOSTED=1`, which the `Dockerfile` sets):
 
 - pick a stack and options, then copy, download (.zip) or edit the files;
-- folder browsing and writing to a folder are refused by the API (and hidden in the UI), and no server path is ever sent to the browser;
 - cross-site requests are still rejected; the page, `robots.txt`, `sitemap.xml`, canonical and Open Graph URLs use `SITE_URL`, else the production domain, else the request's own host (preview deployments are noindexed by Vercel);
-- to write the files into a project folder, run Dockcrate locally (`dockcrate serve` or the CLI).
+- to write the files straight into a project folder, use the CLI.
 
 ## CLI
 
@@ -243,8 +242,8 @@ src/                  the generator (plain ESM, no dependencies)
   compose.js          compose, networks, environments   container.js healthcheck/packages/env/args, image flavors
   blocks.js           the editable blocks               extras.js   Dependabot/Renovate, devcontainer, Makefile, .editorconfig
   api.js              JSON handlers + request guard     fsutil.js   line-joining helpers
-app/                  Next.js (App Router): page, /api/generate, /api/browse, metadata (layout, manifest, robots, sitemap, icons), loading skeleton
-components/ lib/      UI (React client components, form state, diff, zip, grouping files by service, site origin)
+app/                  Next.js (App Router): landing page (/), editor (/generator), guide pages (/dockerfile-generator, ...), /api/generate, metadata (layout, manifest, robots, sitemap, icons), loading skeleton
+components/ lib/      UI (React client components, form state, zip, grouping files by service, site origin)
 proxy.js              per-request Content-Security-Policy (nonce)
 Dockerfile            the hosted site image; .github/workflows/deploy.yml tests, pushes it to VCR and deploys it; vercel.json turns Vercel's Git deploys off
 public/               logo, social image, PNG icons (generated)

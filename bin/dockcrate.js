@@ -150,11 +150,10 @@ function serve(port) {
     const build = spawnSync(process.execPath, [next, 'build'], { cwd: ROOT, stdio: 'inherit' });
     if (build.status !== 0) throw new Error('the UI build failed');
   }
-  console.log(`dockcrate UI: http://localhost:${port}  (Ctrl+C to stop)`);
+  console.log(`dockcrate UI: http://localhost:${port}/generator  (Ctrl+C to stop)`);
   const child = spawn(process.execPath, [next, 'start', '-H', '127.0.0.1', '-p', String(port)], {
     cwd: ROOT,
     stdio: 'inherit',
-    env: { ...process.env, DOCKCRATE_CWD: process.cwd() }, // the UI opens on the folder you launched it from
   });
   child.on('exit', (code) => process.exit(code ?? 0));
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));

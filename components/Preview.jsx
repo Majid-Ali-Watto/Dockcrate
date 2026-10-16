@@ -3,7 +3,6 @@
 import dynamic from 'next/dynamic';
 import { useMemo, useState } from 'react';
 import { download } from '../lib/client.js';
-import { changedLines, fileState, splitLines } from '../lib/diff.js';
 import { groupPaths } from '../lib/groups.js';
 import Accuracy from './Accuracy.jsx';
 import { Skeleton, SkeletonPreview } from './Skeleton.jsx';
@@ -11,17 +10,11 @@ import { Skeleton, SkeletonPreview } from './Skeleton.jsx';
 // Only needed once the user starts editing.
 const BlockEditor = dynamic(() => import('./BlockEditor.jsx'), { loading: () => <Skeleton rows={6} label="Loading the editor" /> });
 
-const TAG_LABELS = { new: 'new', same: 'identical', differs: 'differs' };
-
-function Tag({ state }) {
-  return <span className={`tag ${state}`}>{TAG_LABELS[state]}</span>;
-}
-
-function Code({ lines, changed, label }) {
+function Code({ lines, label }) {
   return (
     <pre tabIndex={0} aria-label={label}>
       {lines.map((text, i) => (
-        <span key={i} className={changed.has(i) ? 'line changed' : 'line'}>
+        <span key={i} className="line">
           {text}
         </span>
       ))}
@@ -29,11 +22,10 @@ function Code({ lines, changed, label }) {
   );
 }
 
-export default function Preview({ result, error, loading, hosted = false, canWrite, onWrite, writing, written, writeError, edits = {}, onEdit }) {
+export default function Preview({ result, error, loading, edits = {}, onEdit }) {
   const [active, setActive] = useState('');
   const [editing, setEditing] = useState(false);
   const [newFile, setNewFile] = useState(null);
-  const [force, setForce] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const files = result?.files ?? [];
@@ -42,19 +34,7 @@ export default function Preview({ result, error, loading, hosted = false, canWri
   const file = files.find((f) => f.path === active) ?? files[0];
   const allPaths = [...files.map((f) => f.path), ...disabled.map(([path]) => path)];
   const groups = result?.multi ? groupPaths(allPaths, result.services) : [{ name: '', paths: allPaths }];
-  const counts = useMemo(() => {
-    const c = { new: 0, same: 0, differs: 0 };
-    for (const f of files) c[fileState(f)]++;
-    return c;
-  }, [files]);
-
-  const view = useMemo(() => {
-    if (!file) return null;
-    const generated = splitLines(file.content);
-    if (file.existing == null) return { generated, existing: null, gone: new Set(), added: new Set() };
-    const existing = splitLines(file.existing);
-    return { generated, existing, ...changedLines(existing, generated) };
-  }, [file]);
+  const lines = useMemo(() => file?.content.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n'), [file]);
 
   const copy = async () => {
     await navigator.clipboard.writeText(file.content);
@@ -93,7 +73,6 @@ export default function Preview({ result, error, loading, hosted = false, canWri
                       return f ? (
                         <button key={path} type="button" role="tab" aria-selected={f === file} onClick={() => setActive(path)}>
                           {path}
-                          {fileState(f) !== 'new' && <Tag state={fileState(f)} />}
                           {edits[path] && <span className="tag edited">edited</span>}
                         </button>
                       ) : (
@@ -146,23 +125,12 @@ export default function Preview({ result, error, loading, hosted = false, canWri
           </section>
         </div>
       )}
-      {!error && file && view && !editing && (
-        <div className={`panes ${view.existing ? 'two' : 'one'}`}>
-          {view.existing && (
-            <section className="pane">
-              <div className="pane-head">
-                <strong>Existing</strong>
-                <code>{file.path}</code>
-                <Tag state={fileState(file)} />
-              </div>
-              <Code lines={view.existing} changed={view.gone} label="Existing file" />
-            </section>
-          )}
+      {!error && file && !editing && (
+        <div className="panes one">
           <section className="pane">
             <div className="pane-head">
               <strong>Generated</strong>
               <code>{file.path}</code>
-              {!view.existing && <Tag state="new" />}
               <span className="push" />
               {onEdit && (
                 <button type="button" onClick={() => setEditing(true)}>
@@ -176,7 +144,7 @@ export default function Preview({ result, error, loading, hosted = false, canWri
                 {copied ? 'Copied' : 'Copy'}
               </button>
             </div>
-            <Code lines={view.generated} changed={view.added} label="Generated file" />
+            <Code lines={lines} label="Generated file" />
           </section>
         </div>
       )}
@@ -196,40 +164,12 @@ export default function Preview({ result, error, loading, hosted = false, canWri
               </ul>
             </details>
           )}
-          <div className="write">
-            {!hosted && (
-              <button type="button" className="primary" disabled={!canWrite || writing} onClick={() => onWrite(force)}>
-                {writing ? 'Writing…' : 'Write files to folder'}
-              </button>
-            )}
-            {files.length > 1 && (
+          {files.length > 1 && (
+            <div className="downloads">
               <button type="button" onClick={async () => download('dockcrate-files.zip', (await import('../lib/zip.js')).zip(files))}>
                 Download all (.zip)
               </button>
-            )}
-            {counts.same + counts.differs > 0 && (
-              <label className="check">
-                <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
-                <span>Overwrite existing files</span>
-              </label>
-            )}
-            <span className="hint">
-              {hosted
-                ? 'Copy or download the files above.'
-                : canWrite
-                ? `${counts.new} new${counts.differs ? `, ${counts.differs} differ (kept unless “Overwrite” is ticked)` : ''}${counts.same ? `, ${counts.same} identical` : ''}.`
-                : 'Choose a folder to write to, or copy or download the files above.'}
-            </span>
-          </div>
-          {(written || writeError) && (
-            <ul className="written" aria-live="polite">
-              {writeError && <li className="error">{writeError}</li>}
-              {written?.map(({ path, status: s }) => (
-                <li key={path} className={s}>
-                  {s === 'written' ? `wrote    ${path}` : `skipped  ${path} (exists; tick “Overwrite” to replace)`}
-                </li>
-              ))}
-            </ul>
+            </div>
           )}
         </div>
       )}

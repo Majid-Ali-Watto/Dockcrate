@@ -1,6 +1,7 @@
 'use client';
 
-import { Check, Field, MultiField, SelectField, opts } from './Controls.jsx';
+import { Check, ChoiceField, Field, MultiField, SelectField, opts } from './Controls.jsx';
+import { RUNTIMES } from '../lib/form.js';
 
 const slug = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
@@ -13,7 +14,8 @@ export default function Services({ form, set, meta, show, loading }) {
   const { multi } = show;
   const list = form.services ?? [];
   const stackOptions = opts(meta.stacks.map((s) => s.id));
-  const defaultPort = (svc) => meta.stacks.find((s) => s.id === svc.stack)?.port;
+  const stackOf = (svc) => meta.stacks.find((s) => s.id === svc.stack);
+  const defaultPort = (svc) => stackOf(svc)?.port;
 
   const edit = (next) => set('services', next);
   const update = (i, patch) => edit(list.map((s, n) => (n === i ? { ...s, ...patch } : s)));
@@ -26,8 +28,10 @@ export default function Services({ form, set, meta, show, loading }) {
   if (!multi) {
     return (
       <div className="field">
+        <div className="or">or</div>
         <button
           type="button"
+          className="split"
           onClick={() =>
             edit([
               { name: 'app', dir: 'app', stack: form.stack || 'node' },
@@ -56,7 +60,7 @@ export default function Services({ form, set, meta, show, loading }) {
             </Field>
           </div>
           <div className="row">
-            <SelectField label="Stack" value={svc.stack ?? 'node'} onChange={(v) => update(i, { stack: v })} options={stackOptions} />
+            <SelectField label="Stack" value={svc.stack ?? 'node'} onChange={(v) => update(i, { stack: v, runtime: '', tool: '' })} options={stackOptions} />
             <Field label="Port">
               {(id) => (
                 <input
@@ -71,6 +75,25 @@ export default function Services({ form, set, meta, show, loading }) {
                 />
               )}
             </Field>
+          </div>
+          <div className="row">
+            <ChoiceField
+              key={svc.stack}
+              label="Runtime"
+              value={svc.runtime ?? ''}
+              defaultLabel="Default"
+              options={opts(RUNTIMES[svc.stack] ?? [])}
+              placeholder="e.g. 22"
+              onChange={(v) => update(i, { runtime: v })}
+            />
+            {stackOf(svc)?.tools.length > 0 && (
+              <SelectField
+                label="Package manager"
+                value={svc.tool || stackOf(svc).tools[0]}
+                onChange={(v) => update(i, { tool: v })}
+                options={opts(stackOf(svc).tools)}
+              />
+            )}
           </div>
           <Check
             checked={Array.isArray(svc.db)}

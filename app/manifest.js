@@ -4,7 +4,7 @@ export default function manifest() {
     name: 'Dockcrate · Docker & CI/CD file generator',
     short_name: 'Dockcrate',
     description: 'Generate Dockerfile, compose, CI/CD and deployment files for any project.',
-    start_url: '/',
+    start_url: '/generator',
     scope: '/',
     lang: 'en',
     dir: 'ltr',

@@ -19,7 +19,8 @@ FROM node:24-alpine
 WORKDIR /app
 # A public server has no project folders of the user's: hosted mode refuses browsing and writing the disk.
 # Next reads PORT; set it to what the platform sends traffic to.
-ENV NODE_ENV=production DOCKCRATE_HOSTED=1 NEXT_TELEMETRY_DISABLED=1 PORT=3000
+# SITE_URL is the public address every canonical, Open Graph, sitemap and robots URL points at (lib/site.js), whatever host a request used.
+ENV NODE_ENV=production DOCKCRATE_HOSTED=1 NEXT_TELEMETRY_DISABLED=1 PORT=3000 SITE_URL=https://dockcrate.vercel.app
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/.next ./.next
 COPY package.json next.config.mjs ./

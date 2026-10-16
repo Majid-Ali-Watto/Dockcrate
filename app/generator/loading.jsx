@@ -1,4 +1,4 @@
-import { Skeleton, SkeletonFields, SkeletonPreview } from '../components/Skeleton.jsx';
+import { Skeleton, SkeletonFields, SkeletonPreview } from '../../components/Skeleton.jsx';
 
 // Shown while the page is rendered on the server and its script loads: the same shell as the app, with grey placeholders.
 export default function Loading() {

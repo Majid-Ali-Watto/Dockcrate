@@ -1,11 +1,7 @@
 // The generator's HTTP surface, independent of the web framework: Next route handlers wrap these functions.
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { gzipSync } from 'node:zlib';
-import { dirname, join, resolve } from 'node:path';
 import {
   generate,
-  writeFiles,
   stackInfo,
   dbIds,
   ciIds,
@@ -28,12 +24,10 @@ import {
 } from './generate.js';
 
 const MAX_BODY = 512 * 1024;
-const MAX_PREVIEW = 256 * 1024;
-const MAX_FOLDERS = 500;
 
 /**
- * Hosted mode (Vercel, or DOCKCRATE_HOSTED=1): the server is someone else's machine, so nothing may touch its disk.
- * Files are generated to copy or download; browsing folders and writing to one are refused.
+ * Hosted mode (Vercel, or DOCKCRATE_HOSTED=1): the server is a public site, not the user's machine, so any Host is
+ * accepted. The API never touches the server's disk in either mode: files are generated to copy or download.
  */
 export const isHosted = () => Boolean(process.env.VERCEL) || process.env.DOCKCRATE_HOSTED === '1';
 
@@ -91,46 +85,7 @@ const blank = (v) => v == null || v === '' || (Array.isArray(v) && !v.length);
 // "a, b" or ["a", "b"] -> ["a", "b"]
 const list = (v) => (Array.isArray(v) ? v : String(v).split(',')).map((s) => String(s).trim()).filter(Boolean);
 
-const isDirectory = (path) => {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
-};
-
-function existingFolder(input) {
-  if (typeof input !== 'string' || !input.trim()) throw new HttpError(400, 'enter a folder');
-  const dir = expand(input);
-  if (!isDirectory(dir)) throw new HttpError(400, `${dir} is not a directory`);
-  return dir;
-}
-
-const expand = (input) => resolve(input.trim().replace(/^~(?=$|\/)/, homedir()));
-
-/** The project folder the files are added to: may not exist yet (it is created on write), may be blank (preview only). */
-function targetDir(input) {
-  if (input == null || (typeof input === 'string' && !input.trim())) return null;
-  if (typeof input !== 'string') throw new HttpError(400, 'invalid folder');
-  const dir = expand(input);
-  try {
-    if (!statSync(dir).isDirectory()) throw new HttpError(400, `${dir} exists and is not a folder`);
-  } catch (err) {
-    if (err instanceof HttpError) throw err;
-  }
-  return dir;
-}
-
-/** Current content of `path` inside `dir`, or null when there is no such file. */
-function existingContent(dir, path) {
-  try {
-    return readFileSync(join(dir, path), 'utf8').slice(0, MAX_PREVIEW);
-  } catch {
-    return null;
-  }
-}
-
-/** Everything the UI needs to render its controls. `cwd` is where `dockcrate serve` was started. */
+/** Everything the UI needs to render its controls. */
 export function getMeta() {
   return {
     stacks: stackInfo(),
@@ -146,28 +101,7 @@ export function getMeta() {
     providers: providerInfo(),
     pipeline: { permissions: PERMISSIONS, testOs: TEST_OS, platforms: PLATFORMS, concurrency: CONCURRENCY, deployOn: DEPLOY_ON, registry: REGISTRY_CHOICES, imageTags: IMAGE_TAGS, severities: SEVERITIES },
     hosted: isHosted(),
-    cwd: isHosted() ? '' : (process.env.DOCKCRATE_CWD ?? process.cwd()),
-    home: isHosted() ? '' : homedir(),
   };
-}
-
-/** Subfolders of `dir` (hidden ones and node_modules left out), so a project folder can be picked. */
-export function handleBrowse(body) {
-  if (isHosted()) throw new HttpError(404, 'not available on the hosted site');
-  const dir = existingFolder(body.dir || homedir());
-  let names;
-  try {
-    names = readdirSync(dir, { withFileTypes: true }).map((e) => e.name);
-  } catch {
-    throw new HttpError(400, `cannot read ${dir}`);
-  }
-  const entries = names
-    .filter((name) => !name.startsWith('.') && name !== 'node_modules' && isDirectory(join(dir, name)))
-    .sort((a, b) => a.localeCompare(b))
-    .slice(0, MAX_FOLDERS)
-    .map((name) => ({ name }));
-  const parent = dirname(dir);
-  return { dir, parent: parent === dir ? null : parent, entries };
 }
 
 const STRING_OPTIONS = [
@@ -197,13 +131,8 @@ function cleanService(raw) {
   return svc;
 }
 
-/** Preview (or, with `write: true`, write) the files for the options in `body`. */
+/** The files for the options in `body`; nothing is read or written on the server's disk. */
 export function handleGenerate(body) {
-  const hosted = isHosted();
-  if (hosted && body.write === true) {
-    throw new HttpError(400, 'the hosted site generates files to copy or download; run Dockcrate locally to write them into a folder');
-  }
-  const dir = hosted ? null : targetDir(body.dir);
   const opts = {};
   for (const key of STRING_OPTIONS) {
     if (!blank(body[key])) opts[key] = String(body[key]);
@@ -243,16 +172,9 @@ export function handleGenerate(body) {
   if (typeof body.build === 'boolean') opts.build = body.build;
   if (Array.isArray(body.include)) opts.include = body.include.map(String);
 
-  let result;
   try {
-    result = generate(dir, opts);
+    return generate(null, opts);
   } catch (err) {
     throw new HttpError(400, err.message);
   }
-  result.files = result.files.map((f) => ({ ...f, existing: dir ? existingContent(dir, f.path) : null }));
-  if (body.write === true) {
-    if (!dir) throw new HttpError(400, 'choose a folder to write to');
-    result.written = writeFiles(dir, result.files, { force: body.force === true });
-  }
-  return { dir, ...result };
 }

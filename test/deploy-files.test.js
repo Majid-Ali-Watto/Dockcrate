@@ -8,6 +8,10 @@ test('the site image runs in hosted mode (no disk access on a public server)', (
   assert.match(read('Dockerfile'), /DOCKCRATE_HOSTED=1/);
 });
 
+test('the site image names its public address, so canonical and sitemap URLs never follow the request host', () => {
+  assert.match(read('Dockerfile'), /SITE_URL=https:\/\/dockcrate\.vercel\.app(\s|$)/);
+});
+
 test('Vercel Git deployments are off: the workflow is the only deployer', () => {
   assert.equal(JSON.parse(read('vercel.json')).git.deploymentEnabled, false);
 });

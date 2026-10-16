@@ -61,8 +61,9 @@ export const viewport = {
   ],
 };
 
-// Runs before first paint so a saved theme does not flash the OS one.
-const THEME_SCRIPT = `try{var t=localStorage.getItem('dockcrate-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}`;
+// Runs before first paint so a saved theme does not flash the OS one. The color-scheme meta tag is what colours the page
+// before the stylesheet applies, so it follows the saved theme too (it says "light dark", i.e. the OS, otherwise).
+const THEME_SCRIPT = `try{var t=localStorage.getItem('dockcrate-theme');if(t==='light'||t==='dark'){document.documentElement.dataset.theme=t;var m=document.querySelector('meta[name=color-scheme]');if(m)m.content=t}}catch(e){}`;
 
 // Both scripts are served by Vercel at /_vercel/*; anywhere else (`dockcrate serve`, `npm run dev`) they 404 and log console errors.
 const ON_VERCEL = Boolean(process.env.VERCEL);
